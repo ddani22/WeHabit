@@ -8,14 +8,13 @@ import {
   increment,
   query,
   updateDoc,
-  where, writeBatch
+  where,
+  writeBatch
 } from 'firebase/firestore';
 import { auth, db } from '../../firebaseConfig';
-// 1. IMPORTAR EL SERVICIO DE FEED (ESTO FALTABA)
 import FeedService from './feedService';
 import UserService from './userService';
 
-// Helper para calcular diferencia de días
 const getDaysDiff = (dateString) => {
   if (!dateString) return 999;
   const today = new Date();
@@ -61,7 +60,6 @@ const HabitService = {
         const data = document.data();
         let habit = { id: document.id, ...data };
 
-        // Auto-reparación de racha
         if (habit.currentStreak > 0) {
           const daysDiff = getDaysDiff(habit.lastCompletedDate);
           if (daysDiff > 1) {
@@ -81,7 +79,7 @@ const HabitService = {
     try { await deleteDoc(doc(db, 'habits', habitId)); } catch (error) { throw error; }
   },
 
-  // --- AQUÍ ESTÁ LA FUSIÓN CLAVE ---
+  // --- CORRECCIÓN APLICADA AQUÍ ---
   checkInHabit: async (habitId, userId) => {
     try {
       const todayISO = new Date().toISOString();
@@ -93,55 +91,137 @@ const HabitService = {
       const habitData = habitSnap.data();
 
       const daysDiff = getDaysDiff(habitData.lastCompletedDate);
-      if (daysDiff === 0) return; // Ya hecho hoy
 
-      // Crear Log
+      // 1. CONSULTA CORREGIDA: AÑADIDO where("userId", "==", userId)
       const logsRef = collection(db, 'logs');
-      await addDoc(logsRef, {
-        habitId, userId, date: todayDate, completedAt: todayISO, isCompleted: true
-      });
+      const qLog = query(
+        logsRef,
+        where("habitId", "==", habitId),
+        where("date", "==", todayDate),
+        where("userId", "==", userId) // <--- ESTE FILTRO FALTABA
+      );
+      const snapLog = await getDocs(qLog);
 
-      // Calcular Racha
-      let newStreak = 1;
-      if (daysDiff === 1) newStreak = (habitData.currentStreak || 0) + 1;
+      // Si no existe log de hoy, lo creamos
+      if (snapLog.empty) {
+        await addDoc(logsRef, {
+          habitId, userId, date: todayDate, completedAt: todayISO, isCompleted: true
+        });
+      } else {
+        // Si ya existe, no hacemos nada más (ya está marcado)
+        return true;
+      }
 
-      // Actualizar Hábito
+      // 2. CALCULAR RACHA
+      let newStreak = habitData.currentStreak || 0;
+
+      if (daysDiff > 0) {
+        if (daysDiff === 1) {
+          newStreak += 1;
+        } else {
+          newStreak = 1;
+        }
+      }
+
+      // 3. ACTUALIZAR HÁBITO
       await updateDoc(habitRef, {
         currentStreak: newStreak,
         lastCompletedDate: todayISO,
         bestStreak: Math.max(newStreak, habitData.bestStreak || 0)
       });
 
-      // 2. RECUPERAMOS EL LOG AL FEED (ESTO SE HABÍA BORRADO)
-      const userRef = doc(db, 'users', userId);
-      const userSnap = await getDoc(userRef);
+      // 4. FEED Y XP
+      if (daysDiff > 0) {
+        try {
+          const userRef = doc(db, 'users', userId);
+          const userSnap = await getDoc(userRef);
 
-      if (userSnap.exists()) {
-        const userData = userSnap.data();
-        const streakMsg = newStreak > 1 ? `¡Racha de ${newStreak} días! 🔥` : "Ha comenzado un hábito";
+          if (userSnap.exists()) {
+            const userData = userSnap.data();
+            const streakMsg = newStreak > 1 ? `¡Racha de ${newStreak} días! 🔥` : "Ha comenzado un hábito";
 
-        await FeedService.logActivity(
-          userId,
-          userData.username || 'Usuario',
-          userData.avatar || null,
-          'habit_done',
-          `Completó: ${habitData.name}`,
-          streakMsg
-        );
+            await FeedService.logActivity(
+              userId,
+              userData.username || 'Usuario',
+              userData.avatar || null,
+              'habit_done',
+              `Completó: ${habitData.name}`,
+              streakMsg
+            );
+          }
+        } catch (feedError) { console.warn("Error feed:", feedError); }
+
+        let xpEarned = 10;
+        if (newStreak > 3) xpEarned += 5;
+        UserService.addExperience(userId, xpEarned);
       }
-
-      let xpEarned = 10;
-      if (newStreak > 3) xpEarned += 5;
-      UserService.addExperience(userId, xpEarned);
 
       return true;
     } catch (error) { console.error("Error en checkIn:", error); throw error; }
+  },
+
+  undoCheckIn: async (habitId, userId) => {
+    try {
+      const today = new Date().toISOString().split('T')[0];
+      const batch = writeBatch(db);
+
+      const logsRef = collection(db, 'logs');
+      const q = query(
+        logsRef,
+        where("habitId", "==", habitId),
+        where("userId", "==", userId),
+        where("date", "==", today)
+      );
+      const snapshot = await getDocs(q);
+
+      if (snapshot.empty) return;
+
+      snapshot.forEach(doc => {
+        batch.delete(doc.ref);
+      });
+
+      const habitRef = doc(db, 'habits', habitId);
+      batch.update(habitRef, {
+        currentStreak: increment(-1),
+      });
+
+      await batch.commit();
+    } catch (error) {
+      console.error("Error deshaciendo:", error);
+      throw error;
+    }
   },
 
   updateHabit: async (habitId, updatedFields) => {
     try {
       const habitRef = doc(db, 'habits', habitId);
       await updateDoc(habitRef, updatedFields);
+    } catch (error) { console.error(error); throw error; }
+  },
+
+  deleteMultipleHabits: async (habitIds) => {
+    try {
+      const batch = writeBatch(db);
+      habitIds.forEach(id => {
+        const habitRef = doc(db, 'habits', id);
+        batch.delete(habitRef);
+      });
+      await batch.commit();
+    } catch (error) { console.error("Error borrando grupo:", error); throw error; }
+  },
+
+  moveHabitsToCategory: async (habitIds, newCategoryId, newCategoryLabel, newCategoryColor) => {
+    try {
+      const batch = writeBatch(db);
+      habitIds.forEach(id => {
+        const habitRef = doc(db, 'habits', id);
+        batch.update(habitRef, {
+          categoryId: newCategoryId,
+          categoryLabel: newCategoryLabel,
+          categoryColor: newCategoryColor
+        });
+      });
+      await batch.commit();
     } catch (error) { console.error(error); throw error; }
   },
 
@@ -161,52 +241,7 @@ const HabitService = {
     const q = query(collection(db, 'logs'), where("userId", "==", userId), where("date", "==", today));
     const snapshot = await getDocs(q);
     return snapshot.docs.map(doc => doc.data().habitId);
-  },
-  /**
-   * Deshacer el Check-in de hoy.
-   * 1. Borra el log de hoy.
-   * 2. Resta 1 a la racha.
-   */
-  undoCheckIn: async (habitId, userId) => {
-    try {
-      const today = new Date().toISOString().split('T')[0];
-      const batch = writeBatch(db);
-
-      // 1. Buscar el log de hoy para borrarlo
-      const logsRef = collection(db, 'logs');
-      const q = query(
-        logsRef,
-        where("habitId", "==", habitId),
-        where("userId", "==", userId),
-        where("date", "==", today)
-      );
-      const snapshot = await getDocs(q);
-
-      if (snapshot.empty) return; // No hay nada que deshacer
-
-      // Borramos todos los logs encontrados (debería ser uno solo)
-      snapshot.forEach(doc => {
-        batch.delete(doc.ref);
-      });
-
-      // 2. Restar 1 a la racha del hábito
-      const habitRef = doc(db, 'habits', habitId);
-      // Usamos increment(-1) para restar atómicamente
-      // Nota: Podríamos verificar que no baje de 0, pero la lógica de UI lo protege
-      batch.update(habitRef, {
-        currentStreak: increment(-1),
-        // Opcional: Podríamos intentar restaurar lastCompletedDate a ayer, 
-        // pero para simplificar lo dejamos así (el sistema se auto-corrige mañana)
-      });
-
-      // 3. Ejecutar
-      await batch.commit();
-
-    } catch (error) {
-      console.error("Error deshaciendo hábito:", error);
-      throw error;
-    }
-  },
+  }
 };
 
 export default HabitService;
