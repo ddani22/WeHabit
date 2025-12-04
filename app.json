@@ -1,0 +1,44 @@
+{
+  "expo": {
+    "name": "WeHabit",
+    "slug": "weHabit-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "wehabitapp",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+
+    "splash": {
+      "image": "./assets/images/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor":"#121212"
+    },
+
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.dani.wehabit"
+    },
+
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#121212",
+        "foregroundImage": "./assets/images/icon.png"
+      },
+      "package": "com.dani.wehabit",
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false
+    },
+
+    "web": {
+      "output": "static",
+      "favicon": "./assets/images/icon.png"
+    },
+    "plugins": [],
+
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    }
+  }
+}
