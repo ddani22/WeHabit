@@ -5,7 +5,6 @@ import {
   doc,
   getDoc,
   getDocs,
-  increment,
   query,
   updateDoc,
   where,
@@ -163,8 +162,8 @@ const HabitService = {
   undoCheckIn: async (habitId, userId) => {
     try {
       const today = new Date().toISOString().split('T')[0];
-      const batch = writeBatch(db);
 
+      // 1. Obtener el log de hoy para borrarlo
       const logsRef = collection(db, 'logs');
       const q = query(
         logsRef,
@@ -174,16 +173,45 @@ const HabitService = {
       );
       const snapshot = await getDocs(q);
 
-      if (snapshot.empty) return;
+      if (snapshot.empty) return; // Si no hay log de hoy, no hacemos nada
 
+      const batch = writeBatch(db);
       snapshot.forEach(doc => {
         batch.delete(doc.ref);
       });
 
+      // 2. BUSCAR LA FECHA ANTERIOR REAL (Para restaurar lastCompletedDate)
+      // Nota: Si no tienes índices compuestos creados, evitar orderBy/limit en la query.
+      // Traemos los logs y filtramos en memoria (seguro para MVP).
+      const qHistory = query(
+        logsRef,
+        where("habitId", "==", habitId),
+        where("userId", "==", userId)
+      );
+      const historySnap = await getDocs(qHistory);
+
+      // Filtramos en JS para encontrar la fecha más reciente que NO sea hoy
+      const validDates = historySnap.docs
+        .map(d => d.data().completedAt) // Usamos el ISO string completo o 'date'
+        .filter(d => d && !d.startsWith(today)) // Excluir hoy
+        .sort() // Ordenar cronológicamente
+        .reverse(); // El primero será el más reciente
+
+      const previousDate = validDates.length > 0 ? validDates[0] : null;
+
+      // 3. Actualizar el Hábito de forma segura
       const habitRef = doc(db, 'habits', habitId);
-      batch.update(habitRef, {
-        currentStreak: increment(-1),
-      });
+      const habitSnap = await getDoc(habitRef);
+
+      if (habitSnap.exists()) {
+        const currentStreak = habitSnap.data().currentStreak || 0;
+        const newStreak = Math.max(0, currentStreak - 1); // BLINDAJE CONTRA NEGATIVOS
+
+        batch.update(habitRef, {
+          currentStreak: newStreak,
+          lastCompletedDate: previousDate // Restauramos la fecha anterior o null
+        });
+      }
 
       await batch.commit();
     } catch (error) {
