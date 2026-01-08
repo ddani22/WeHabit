@@ -13,11 +13,12 @@ import {
   View
 } from 'react-native';
 import { auth, db } from '../../../firebaseConfig';
+import ConfettiOverlay from '../../components/ConfettiOverlay';
 import { useTheme } from '../../context/ThemeContext';
 import ChallengeService from '../../services/challengeService';
 import FeedbackService from '../../services/feedbackService';
 import HabitService from '../../services/habitService';
-import UserService from '../../services/userService'; // <--- IMPORTANTE
+import UserService from '../../services/userService';
 
 if (Platform.OS === 'android') {
   if (UIManager.setLayoutAnimationEnabledExperimental) {
@@ -29,7 +30,7 @@ export default function HomeScreen({ navigation }) {
   const { theme, isDark } = useTheme();
   const { colors } = theme;
   const user = auth.currentUser;
-
+  const [showConfetti, setShowConfetti] = useState(false);
   const [habits, setHabits] = useState([]);
   const [completedIds, setCompletedIds] = useState([]);
   const [refreshing, setRefreshing] = useState(false);
@@ -60,8 +61,12 @@ export default function HomeScreen({ navigation }) {
     const habitId = habitItem.id;
     const isCompleted = completedIds.includes(habitId);
 
-    if (isCompleted) FeedbackService.triggerImpactLight();
-    else FeedbackService.triggerSuccess();
+    if (isCompleted) {
+      FeedbackService.triggerImpactLight();
+    } else {
+      FeedbackService.triggerSuccess();
+      setShowConfetti(true); // <--- ¡AQUÍ! Activamos la fiesta
+    }
 
     if (isCompleted) {
       setCompletedIds(prev => prev.filter(id => id !== habitId));
@@ -298,6 +303,12 @@ export default function HomeScreen({ navigation }) {
           <Ionicons name="add" size={30} color="#fff" />
         </LinearGradient>
       </TouchableOpacity>
+
+      {/* COMPONENTE DE CONFETTI SUPERPUESTO */}
+      <ConfettiOverlay
+        isVisible={showConfetti}
+        onAnimationFinish={() => setShowConfetti(false)}
+      />
     </View>
   );
 }

@@ -6,20 +6,24 @@ import {
     getDocs,
     limit,
     orderBy,
-    query, where
+    query,
+    where
 } from 'firebase/firestore';
 import { db } from '../../firebaseConfig';
+
+// Helper para dividir arrays grandes en trozos pequeños (Chunking)
+const chunkArray = (array, size) => {
+    const chunks = [];
+    for (let i = 0; i < array.length; i += size) {
+        chunks.push(array.slice(i, i + size));
+    }
+    return chunks;
+};
 
 const FeedService = {
 
     /**
      * Registra un evento en el muro global.
-     * @param {string} userId - Quién lo hizo
-     * @param {string} username - Nombre (para no tener que buscarlo luego)
-     * @param {string} avatar - Foto (igual, para optimizar lectura)
-     * @param {string} type - 'habit_done' | 'challenge_won'
-     * @param {string} title - Ej: "Ha completado 'Leer'"
-     * @param {string} description - Ej: "Racha de 12 días 🔥"
      */
     logActivity: async (userId, username, avatar, type, title, description) => {
         try {
@@ -33,41 +37,60 @@ const FeedService = {
                 createdAt: new Date().toISOString()
             });
         } catch (error) {
-            // Si falla el log, no rompemos la app, solo lo ignoramos
             console.error("Error registrando actividad:", error);
         }
     },
 
     /**
-     * Obtiene las actividades recientes de tus amigos.
+     * Obtiene las actividades recientes de tus amigos sin límite de 10.
+     * Estrategia: Batch Querying + Merge Sort en cliente.
      */
     getFriendsFeed: async (friendIds) => {
         if (!friendIds || friendIds.length === 0) return [];
 
         try {
-            // NOTA: Firestore limita el operador 'in' a 10 valores.
-            // Para este MVP, tomamos solo los primeros 10 amigos para evitar errores.
-            // En una app real, haríamos múltiples consultas.
-            const safeFriendIds = friendIds.slice(0, 10);
+            // 1. Dividimos los amigos en lotes de 10 (Límite de Firestore)
+            const friendChunks = chunkArray(friendIds, 10);
+            const promises = [];
 
-            const q = query(
-                collection(db, 'activity_feed'),
-                where('userId', 'in', safeFriendIds),
-                orderBy('createdAt', 'desc'),
-                limit(20) // Traemos los últimos 20 eventos
-            );
+            // 2. Lanzamos una consulta por cada lote en paralelo
+            friendChunks.forEach(chunk => {
+                const q = query(
+                    collection(db, 'activity_feed'),
+                    where('userId', 'in', chunk),
+                    orderBy('createdAt', 'desc'),
+                    limit(20) // Traemos los 20 más recientes de CADA grupo para no perder datos
+                );
+                promises.push(getDocs(q));
+            });
 
-            const snap = await getDocs(q);
-            return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            // 3. Esperamos a que todas respondan
+            const snapshots = await Promise.all(promises);
+
+            // 4. Unificamos todos los documentos en una sola lista
+            let allActivities = [];
+            snapshots.forEach(snap => {
+                snap.docs.forEach(doc => {
+                    allActivities.push({ id: doc.id, ...doc.data() });
+                });
+            });
+
+            // 5. Ordenamos en memoria (Memory Sort) por fecha real descendente
+            // Esto es crucial porque al unir lotes se pierde el orden global
+            allActivities.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+            // 6. Devolvemos solo los 20 más recientes del total global
+            return allActivities.slice(0, 20);
+
         } catch (error) {
-            console.error("Error cargando feed:", error);
+            console.error("Error cargando feed escalable:", error);
             return [];
         }
     },
 
     /**
-   * Elimina una actividad específica (Solo si eres el dueño).
-   */
+     * Elimina una actividad específica.
+     */
     deleteActivity: async (activityId) => {
         try {
             await deleteDoc(doc(db, 'activity_feed', activityId));

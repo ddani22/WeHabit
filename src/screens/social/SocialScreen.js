@@ -193,7 +193,7 @@ export default function SocialScreen({ navigation }) {
     );
   };
 
-  // 2. Render RETO (Diseño Premium Face-Pile)
+  // 2. Render RETO (Con Optimistic Update)
   const renderChallengeItem = ({ item, index }) => {
     const myData = item.participants.find(p => p.userId === currentUser.uid);
     const myScore = myData?.currentScore || 0;
@@ -205,14 +205,47 @@ export default function SocialScreen({ navigation }) {
     const isCompletedToday = myData?.lastCompletedDate === today;
 
     const handleChallengeToggle = async () => {
-      if (isCompletedToday) {
-        FeedbackService.triggerImpactLight();
-        await ChallengeService.undoCheckInChallenge(item.id, currentUser.uid);
-      } else {
-        FeedbackService.triggerSuccess();
-        await ChallengeService.checkInChallenge(item.id, currentUser.uid);
+      // 1. Guardar estado anterior por si hay error (Rollback)
+      const previousChallenges = [...challenges];
+
+      // 2. Definir nuevo estado optimista
+      const newScore = isCompletedToday ? Math.max(0, myScore - 1) : myScore + 1;
+      const newDate = isCompletedToday ? null : today;
+
+      // 3. Actualizar UI INMEDIATAMENTE
+      setChallenges(current => current.map(c => {
+        if (c.id === item.id) {
+          return {
+            ...c,
+            participants: c.participants.map(p => {
+              if (p.userId === currentUser.uid) {
+                return { ...p, currentScore: newScore, lastCompletedDate: newDate };
+              }
+              return p;
+            })
+          };
+        }
+        return c;
+      }));
+
+      // 4. Feedback Háptico Inmediato
+      if (isCompletedToday) FeedbackService.triggerImpactLight();
+      else FeedbackService.triggerSuccess();
+
+      // 5. Llamada asíncrona a Firebase (Fuego y olvido)
+      try {
+        if (isCompletedToday) {
+          await ChallengeService.undoCheckInChallenge(item.id, currentUser.uid);
+        } else {
+          await ChallengeService.checkInChallenge(item.id, currentUser.uid);
+        }
+        // NOTA: Ya no llamamos a loadData() para evitar parpadeos. 
+        // Confiamos en nuestro cálculo local.
+      } catch (error) {
+        console.error("Error sync reto:", error);
+        Alert.alert("Error", "No se pudo sincronizar el reto.");
+        setChallenges(previousChallenges); // Revertir cambios
       }
-      loadData();
     };
 
     // Nombres para el pie
@@ -270,7 +303,7 @@ export default function SocialScreen({ navigation }) {
               } else {
                 const f = friends.find(fr => fr.id === participant.userId);
                 avatarToShow = f?.avatar;
-                nameToShow = f?.username || participant.username; // Fallback si no está en amigos
+                nameToShow = f?.username || participant.username;
               }
 
               return (
