@@ -1,5 +1,4 @@
 import { Ionicons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
 import {
   collection,
   doc,
@@ -11,7 +10,9 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
+  Image,
   Platform,
+  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
@@ -32,7 +33,7 @@ if (Platform.OS === 'android') {
   }
 }
 
-// Helpers de fecha locales
+// Helpers
 const getLocalTodayDate = () => {
   const now = new Date();
   const year = now.getFullYear();
@@ -59,13 +60,19 @@ export default function HomeScreen({ navigation }) {
   const [habits, setHabits] = useState([]);
   const [completedIds, setCompletedIds] = useState([]);
   const [userName, setUserName] = useState(user?.displayName || 'Usuario');
+  const [userAvatar, setUserAvatar] = useState(null);
 
-  // --- LISTENERS EN TIEMPO REAL ---
+  // --- LISTENERS ---
   useEffect(() => {
     if (!user) return;
 
+    // Listener de Usuario
     const unsubUser = onSnapshot(doc(db, 'users', user.uid), (docSnap) => {
-      if (docSnap.exists()) setUserName(docSnap.data().username || 'Usuario');
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setUserName(data.username || 'Usuario');
+        setUserAvatar(data.avatar || null);
+      }
     });
 
     const qHabits = query(
@@ -106,7 +113,7 @@ export default function HomeScreen({ navigation }) {
     return () => { unsubUser(); unsubHabits(); unsubLogs(); };
   }, [user]);
 
-  // --- ACCIONES DE HÁBITOS (Solo estas quedan activas) ---
+  // --- ACCIONES ---
   const handleCheckIn = async (habitItem) => {
     const habitId = habitItem.id;
     const isCompleted = completedIds.includes(habitId);
@@ -131,25 +138,12 @@ export default function HomeScreen({ navigation }) {
     Alert.alert("Gestionar Hábito", `¿Qué hacer con "${habitItem.name}"?`, [
       { text: "Cancelar", style: "cancel" },
       { text: "Editar", onPress: () => navigation.navigate('CreateHabit', { habitToEdit: habitItem }) },
-      {
-        text: "Eliminar",
-        style: "destructive",
-        onPress: async () => {
-          try {
-            // AHORA PASAMOS user.uid TAMBIÉN
-            await HabitService.deleteHabit(habitItem.id, user.uid);
-          } catch (error) {
-            Alert.alert("Error", "No se pudo eliminar.");
-          }
-        }
-      }
+      { text: "Eliminar", style: "destructive", onPress: async () => { try { await HabitService.deleteHabit(habitItem.id, user.uid); } catch (error) { Alert.alert("Error", "No se pudo eliminar."); } } }
     ]
     );
   };
 
-  // NOTA: He eliminado handleCategoryLongPress porque ya no se usará.
-
-  // --- MEMOIZACIÓN (LISTA ÚNICA) ---
+  // --- AGRUPACIÓN ---
   const groupedCategories = useMemo(() => {
     const grouped = {};
     habits.forEach(habit => {
@@ -176,179 +170,156 @@ export default function HomeScreen({ navigation }) {
   const progressPercent = totalHabits > 0 ? Math.round((completedCount / totalHabits) * 100) : 0;
   const totalRachas = habits.reduce((acc, h) => acc + (h.currentStreak || 0), 0);
 
-  // --- RENDERIZADOR HÁBITO (HÍBRIDO POSITIVO/NEGATIVO) ---
-  const renderMiniHabit = (item) => {
-    const isNegative = item.type === 'negative';
+  // --- RENDERIZADORES ---
+  const renderHabitItem = (item, categoryColor) => {
     const isCompleted = completedIds.includes(item.id);
-
-    // ACCIÓN HÁBITO NEGATIVO (Reset)
-    const handleNegativePress = () => {
-      Alert.alert(
-        "Reiniciar Contador",
-        `¿Has recaído en "${item.name}"? El contador volverá a 0.`,
-        [
-          { text: "No, falsa alarma", style: "cancel" },
-          {
-            text: "Sí, he fallado",
-            style: "destructive",
-            onPress: async () => {
-              try {
-                await HabitService.resetNegativeHabit(item.id);
-                FeedbackService.triggerError(); // Vibración de fallo
-              } catch (e) { Alert.alert("Error", "No se pudo reiniciar"); }
-            }
-          }
-        ]
-      );
-    };
-
     return (
       <TouchableOpacity
         key={item.id}
-        style={[styles.miniHabitRow, isNegative && { backgroundColor: 'rgba(255, 59, 48, 0.1)' }]}
+        style={[styles.habitRow, { backgroundColor: colors.card, borderColor: isDark ? '#333' : '#f0f0f0' }]}
         onLongPress={() => handleHabitLongPress(item)}
         delayLongPress={500}
         activeOpacity={0.7}
         onPress={() => navigation.navigate('HabitDetail', { habit: item })}
       >
-        <View style={styles.miniHabitIcon}><Text style={{ fontSize: 12 }}>{item.icon}</Text></View>
+        <View style={[styles.iconContainer, { backgroundColor: isDark ? 'rgba(255,255,255,0.1)' : '#F5F5F7' }]}>
+          <Text style={{ fontSize: 20 }}>{item.icon}</Text>
+        </View>
 
         <View style={{ flex: 1, marginRight: 10 }}>
-          <Text style={[styles.miniHabitName, isNegative && { color: colors.danger }]} numberOfLines={1}>{item.name}</Text>
-          {isNegative && (
-            <Text style={{ fontSize: 10, color: colors.textSecondary }}>
-              {item.currentStreak} días libre
+          <Text style={[styles.habitTitle, { color: colors.text, textDecorationLine: isCompleted ? 'line-through' : 'none', opacity: isCompleted ? 0.5 : 1 }]}>
+            {item.name}
+          </Text>
+          {item.currentStreak > 0 && (
+            <Text style={{ fontSize: 11, color: categoryColor, fontWeight: '600', marginTop: 2 }}>
+              🔥 {item.currentStreak} días
             </Text>
           )}
         </View>
 
-        {isNegative ? (
-          // BOTÓN RESET (Solo para hábitos negativos)
-          <TouchableOpacity onPress={handleNegativePress} style={styles.resetBtn}>
-            <Ionicons name="refresh" size={16} color={colors.danger} />
-          </TouchableOpacity>
-        ) : (
-          // CHECKBOX NORMAL (Para hábitos positivos)
-          <TouchableOpacity onPress={() => handleCheckIn(item)}>
-            {isCompleted ? <Ionicons name="checkmark-circle" size={24} color={colors.primary} /> : <View style={styles.radioUnchecked} />}
-          </TouchableOpacity>
-        )}
+        <TouchableOpacity onPress={() => handleCheckIn(item)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+          {isCompleted ? (
+            <Ionicons name="checkmark-circle" size={28} color={categoryColor || colors.primary} />
+          ) : (
+            <View style={[styles.radioUnchecked, { borderColor: isDark ? '#555' : '#ddd' }]} />
+          )}
+        </TouchableOpacity>
       </TouchableOpacity>
-    );
-  };
-
-  const renderCategoryCard = (group) => {
-    const previewItems = group.items.slice(0, 3);
-    const hiddenCount = group.items.length - previewItems.length;
-
-    return (
-      // CAMBIO IMPORTANTE: Usamos View en lugar de TouchableOpacity
-      // Esto desactiva cualquier interacción con la tarjeta en sí (ni click, ni long press)
-      <View
-        key={group.meta.id}
-        style={[styles.categoryCard, { backgroundColor: group.meta.color }]}
-      >
-        <View style={styles.categoryHeader}>
-          <Text style={styles.categoryTitle}>{group.meta.label}</Text>
-          <Text style={styles.categoryCount}>{group.items.length} hábito{group.items.length !== 1 ? 's' : ''}</Text>
-        </View>
-        <View style={styles.habitsList}>
-          {previewItems.map(habit => renderMiniHabit(habit))}
-          {hiddenCount > 0 && <Text style={styles.moreText}>+ {hiddenCount} más...</Text>}
-        </View>
-      </View>
     );
   };
 
   return (
-    <View style={[styles.container, { backgroundColor: colors.background }]}>
+    <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]}>
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        <View style={{ height: 20 }} />
 
-        {/* DASHBOARD */}
-        <LinearGradient colors={['#FF00CC', '#FF9933']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.dashboardCard}>
-          <View style={{ marginBottom: 15 }}>
-            <Text style={styles.welcomeText}>Hola,</Text>
-            <Text style={styles.usernameText}>{userName} 👋</Text>
+        {/* HEADER LIMPIO */}
+        <View style={styles.minimalHeader}>
+          <View>
+            <Text style={[styles.greeting, { color: colors.textSecondary }]}>Hola,</Text>
+            <Text style={[styles.username, { color: colors.text }]}>{userName}</Text>
           </View>
-          <View style={styles.statsContainer}>
-            <View style={styles.statBox}>
-              <View style={styles.statIconBg}><Ionicons name="checkmark-circle-outline" size={20} color="#fff" /></View>
-              <Text style={styles.statBigNumber}>{completedCount}/{totalHabits}</Text>
-              <Text style={styles.statLabel}>Hechos</Text>
-            </View>
-            <View style={styles.statBox}>
-              <View style={styles.statIconBg}><Ionicons name="trending-up" size={20} color="#fff" /></View>
-              <Text style={styles.statBigNumber}>{progressPercent}%</Text>
-              <Text style={styles.statLabel}>Progreso</Text>
-            </View>
-            <View style={styles.statBox}>
-              <View style={styles.statIconBg}><Ionicons name="flame-outline" size={20} color="#fff" /></View>
-              <Text style={styles.statBigNumber}>{totalRachas}</Text>
-              <Text style={styles.statLabel}>Rachas</Text>
-            </View>
-          </View>
-        </LinearGradient>
 
-        {/* LISTA DE CATEGORÍAS (NO INTERACTIVAS) */}
-        {habits.length > 0 ? (
-          <View style={styles.categoriesListContainer}>
-            {groupedCategories.map(group => renderCategoryCard(group))}
+          {/* CORREGIDO: Navega a 'ProfileTab' que es el nombre en AppTabs.js */}
+          <TouchableOpacity
+            onPress={() => navigation.navigate('ProfileTab')}
+            style={[styles.profileIcon, { backgroundColor: colors.card, overflow: 'hidden' }]}
+          >
+            {userAvatar && (userAvatar.startsWith('http') || userAvatar.startsWith('file')) ? (
+              <Image source={{ uri: userAvatar }} style={{ width: '100%', height: '100%' }} />
+            ) : (
+              <Text style={{ fontSize: 20 }}>{userAvatar || '👤'}</Text>
+            )}
+          </TouchableOpacity>
+        </View>
+
+        {/* STATS ROW */}
+        <View style={styles.statsRow}>
+          <View style={[styles.statItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <Text style={[styles.statValue, { color: colors.text }]}>{completedCount}/{totalHabits}</Text>
+            <Text style={styles.statLabel}>Hechos</Text>
           </View>
-        ) : (
-          <View style={styles.emptyState}>
-            <Text style={{ color: colors.textSecondary }}>No hay hábitos aún.</Text>
+          <View style={[styles.statItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <Text style={[styles.statValue, { color: colors.text }]}>{progressPercent}%</Text>
+            <Text style={styles.statLabel}>Progreso</Text>
           </View>
-        )}
+          <View style={[styles.statItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <Text style={[styles.statValue, { color: colors.text }]}>{totalRachas}</Text>
+            <Text style={styles.statLabel}>Fuegos</Text>
+          </View>
+        </View>
+
+        {/* LISTA HÁBITOS */}
+        <View style={{ marginTop: 10 }}>
+          {habits.length > 0 ? (
+            groupedCategories.map(group => (
+              <View key={group.meta.id} style={styles.categorySection}>
+                <Text style={[styles.categoryHeader, { color: group.meta.color }]}>
+                  {group.meta.label.toUpperCase()}
+                </Text>
+                <View style={styles.habitsList}>
+                  {group.items.map(habit => renderHabitItem(habit, group.meta.color))}
+                </View>
+              </View>
+            ))
+          ) : (
+            <View style={styles.emptyState}>
+              <Ionicons name="leaf-outline" size={60} color={colors.textSecondary} style={{ opacity: 0.3 }} />
+              <Text style={{ color: colors.textSecondary, marginTop: 10 }}>Tu día está limpio. ¡Crea un hábito!</Text>
+            </View>
+          )}
+        </View>
 
         <View style={{ height: 100 }} />
       </ScrollView>
 
+      {/* FAB */}
       <TouchableOpacity style={styles.fab} onPress={() => navigation.navigate('CreateHabit')}>
-        <LinearGradient colors={['#FF00CC', '#FF9933']} style={styles.fabGradient}>
-          <Ionicons name="add" size={30} color="#fff" />
-        </LinearGradient>
+        <View style={[styles.fabCircle, { backgroundColor: colors.text }]}>
+          <Ionicons name="add" size={32} color={colors.background} />
+        </View>
       </TouchableOpacity>
+
       <ConfettiOverlay isVisible={showConfetti} onAnimationFinish={() => setShowConfetti(false)} />
-    </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  scrollContent: { paddingHorizontal: 15 },
-  dashboardCard: { borderRadius: 24, padding: 20, marginBottom: 20, marginTop: 40, shadowColor: "#FF00CC", shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.3, shadowRadius: 12, elevation: 8 },
-  welcomeText: { color: 'rgba(255,255,255,0.8)', fontSize: 16 },
-  usernameText: { color: '#fff', fontSize: 28, fontWeight: 'bold' },
-  statsContainer: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 },
-  statBox: { alignItems: 'center', width: '30%' },
-  statIconBg: { width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(255,255,255,0.2)', justifyContent: 'center', alignItems: 'center', marginBottom: 8 },
-  statBigNumber: { color: '#fff', fontSize: 20, fontWeight: 'bold' },
-  statLabel: { color: 'rgba(255,255,255,0.8)', fontSize: 10, marginTop: 2 },
+  scrollContent: { paddingHorizontal: 20, paddingTop: 20 },
 
-  categoriesListContainer: {
-    gap: 15
-  },
-  categoryCard: {
+  minimalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 25, marginTop: 10 },
+  greeting: { fontSize: 16 },
+  username: { fontSize: 30, fontWeight: '800' },
+  profileIcon: { width: 44, height: 44, borderRadius: 22, justifyContent: 'center', alignItems: 'center', shadowColor: "#000", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 5, elevation: 2 },
+
+  statsRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 30 },
+  statItem: { width: '31%', paddingVertical: 15, borderRadius: 16, alignItems: 'center', borderWidth: 1, shadowColor: "#000", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.03, shadowRadius: 3, elevation: 1 },
+  statValue: { fontSize: 18, fontWeight: 'bold' },
+  statLabel: { fontSize: 11, color: '#888', marginTop: 4, textTransform: 'uppercase', letterSpacing: 0.5 },
+
+  categorySection: { marginBottom: 25 },
+  categoryHeader: { fontSize: 12, fontWeight: '700', letterSpacing: 1.2, marginBottom: 12, marginLeft: 5 },
+  habitsList: { gap: 10 },
+
+  habitRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 16,
     borderRadius: 20,
-    padding: 15,
+    borderWidth: 1,
     shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 6,
-    elevation: 3,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.02,
+    shadowRadius: 8,
+    elevation: 1
   },
+  iconContainer: { width: 44, height: 44, borderRadius: 14, justifyContent: 'center', alignItems: 'center', marginRight: 15 },
+  habitTitle: { fontSize: 16, fontWeight: '600' },
+  radioUnchecked: { width: 26, height: 26, borderRadius: 13, borderWidth: 2 },
 
-  categoryHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
-  categoryTitle: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
-  categoryCount: { color: 'rgba(255,255,255,0.8)', fontSize: 12 },
-  habitsList: { gap: 8 },
-  moreText: { color: 'rgba(255,255,255,0.7)', fontSize: 11, fontStyle: 'italic', marginTop: 5 },
-  miniHabitRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 10, padding: 10 },
-  miniHabitIcon: { marginRight: 10 },
-  miniHabitName: { color: '#fff', fontWeight: 'bold', fontSize: 14, flex: 1, marginRight: 10 },
-  radioUnchecked: { width: 22, height: 22, borderRadius: 11, borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.6)' },
-  emptyState: { alignItems: 'center', marginTop: 50 },
-  fab: { position: 'absolute', right: 20, bottom: 20, borderRadius: 30, elevation: 8, shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 4 },
-  fabGradient: { width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center' }
+  emptyState: { alignItems: 'center', marginTop: 60 },
+
+  fab: { position: 'absolute', right: 25, bottom: 30 },
+  fabCircle: { width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', shadowColor: "#000", shadowOffset: { width: 0, height: 5 }, shadowOpacity: 0.2, shadowRadius: 8, elevation: 5 }
 });
