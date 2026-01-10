@@ -36,7 +36,6 @@ const getDaysDiff = (dateString) => {
 
 const HabitService = {
 
-  // CREAR HÁBITO (Soporta 'type')
   createHabit: async (userId, name, frequency, icon, categoryData, type = 'positive') => {
     try {
       const newHabit = {
@@ -50,10 +49,9 @@ const HabitService = {
         bestStreak: 0,
         isActive: true,
         icon,
-        type, // 'positive' | 'negative'
+        type,
         isChallenge: false,
         lastCompletedDate: null,
-        // Para negativos, la fecha de reset inicial es AHORA
         lastResetDate: type === 'negative' ? new Date().toISOString() : null,
         createdAt: new Date().toISOString()
       };
@@ -62,15 +60,13 @@ const HabitService = {
     } catch (error) { console.error(error); throw error; }
   },
 
-  // OBTENER HÁBITOS (Lógica de escudos + Auto-incremento negativos)
   getUserHabits: async (userId) => {
     try {
       const q = query(collection(db, 'habits'), where("userId", "==", userId), where("isActive", "==", true));
       const querySnapshot = await getDocs(q);
       const habits = [];
-      const updates = []; // Batch updates para optimizar
+      const updates = [];
 
-      // Obtenemos escudos
       const userRef = doc(db, 'users', userId);
       const userSnap = await getDoc(userRef);
       let streakShields = userSnap.exists() ? (userSnap.data().streakShields || 0) : 0;
@@ -80,23 +76,20 @@ const HabitService = {
         const data = document.data();
         let habit = { id: document.id, ...data };
 
-        // --- HÁBITO NEGATIVO (Contador Automático) ---
+        // Negativos (Contador Auto)
         if (habit.type === 'negative') {
           const daysFree = getDaysDiff(habit.lastResetDate);
-          // Si ha pasado un día más, actualizamos
           if (daysFree !== habit.currentStreak) {
             habit.currentStreak = daysFree;
             updates.push(updateDoc(doc(db, 'habits', habit.id), { currentStreak: daysFree }));
           }
         }
-        // --- HÁBITO POSITIVO (Lógica de Escudos) ---
+        // Positivos (Escudos)
         else {
           if (habit.currentStreak > 0) {
             const daysDiff = getDaysDiff(habit.lastCompletedDate);
-            // daysDiff > 1 significa que ayer no se hizo
             if (daysDiff > 1) {
               if (streakShields > 0) {
-                // USAR ESCUDO
                 streakShields--;
                 shieldsConsumed++;
                 const yesterday = new Date();
@@ -107,7 +100,6 @@ const HabitService = {
                 updates.push(updateDoc(doc(db, 'habits', habit.id), { lastCompletedDate: yesterdayISO }));
                 console.log(`🛡️ Escudo usado en: ${habit.name}`);
               } else {
-                // ROMPER RACHA
                 habit.currentStreak = 0;
                 updates.push(updateDoc(doc(db, 'habits', habit.id), { currentStreak: 0 }));
               }
@@ -117,9 +109,7 @@ const HabitService = {
         habits.push(habit);
       });
 
-      // Ejecutar actualizaciones
       if (updates.length > 0) await Promise.all(updates);
-      // Actualizar escudos gastados
       if (shieldsConsumed > 0) {
         updateDoc(userRef, {
           streakShields: (userSnap.data().streakShields || 0) - shieldsConsumed
@@ -133,24 +123,17 @@ const HabitService = {
   deleteHabit: async (habitId, userId) => {
     try {
       const today = getLocalTodayDate();
-
-      // 1. Borrar Logs de hoy
       const logsRef = collection(db, 'logs');
       const q = query(logsRef, where("habitId", "==", habitId), where("date", "==", today));
       const snapshot = await getDocs(q);
       const batch = writeBatch(db);
       snapshot.forEach(doc => batch.delete(doc.ref));
-
-      // 2. Borrar Hábito
       batch.delete(doc(db, 'habits', habitId));
       await batch.commit();
-
-      // 3. Borrar Feed
       if (userId) await FeedService.removeLog(userId, 'habit_done', habitId);
     } catch (error) { throw error; }
   },
 
-  // CHECK-IN (Solo Positivos)
   checkInHabit: async (habitId, userId) => {
     try {
       const todayDate = getLocalTodayDate();
@@ -164,10 +147,8 @@ const HabitService = {
         if (!habitDoc.exists()) throw new Error("Hábito no encontrado");
         const d = habitDoc.data();
 
-        // Evitar check-in en negativos
         if (d.type === 'negative') throw new Error("Use reset for negative habits");
 
-        // Idempotencia (ya hecho hoy)
         if (d.lastCompletedDate) {
           const lastDateLocal = new Date(d.lastCompletedDate);
           const lastDateString = `${lastDateLocal.getFullYear()}-${String(lastDateLocal.getMonth() + 1).padStart(2, '0')}-${String(lastDateLocal.getDate()).padStart(2, '0')}`;
@@ -176,6 +157,9 @@ const HabitService = {
 
         const daysDiff = getDaysDiff(d.lastCompletedDate);
         let newStreak = (d.currentStreak || 0);
+
+        // Si daysDiff es 0 (primera vez) o > 1 (roto), la racha empieza/reinicia en 1
+        // Si daysDiff es 1 (ayer), la racha suma
         if (daysDiff === 1) newStreak += 1;
         else newStreak = 1;
 
@@ -196,17 +180,16 @@ const HabitService = {
           isCompleted: true
         });
 
-        // Datos para Feed (fuera de transacción)
         feedInfo = { newStreak, habitName: d.name, daysDiff };
       });
 
-      // Post-Procesamiento (Feed y XP)
-      if (feedInfo && feedInfo.daysDiff > 0) {
+      // --- CORRECCIÓN AQUÍ: Quitamos '&& feedInfo.daysDiff > 0' ---
+      // Ahora entra SIEMPRE que haya info, incluso el primer día.
+      if (feedInfo) {
         try {
           const userDoc = await getDoc(doc(db, 'users', userId));
           const userData = userDoc.exists() ? userDoc.data() : {};
 
-          // Publicar en Feed
           const desc = feedInfo.newStreak > 1
             ? `¡Mantiene una racha de ${feedInfo.newStreak} días! 🔥`
             : `Ha completado su primer día hoy.`;
@@ -216,7 +199,7 @@ const HabitService = {
             'habit_done', `Completó: ${feedInfo.habitName}`, desc, habitId
           );
 
-          // Dar XP
+          // XP
           let xpEarned = 10;
           if (feedInfo.newStreak > 3) xpEarned += 5;
           UserService.addExperience(userId, xpEarned).catch(console.error);
@@ -242,10 +225,8 @@ const HabitService = {
       const batch = writeBatch(db);
       snapshot.forEach(doc => batch.delete(doc.ref));
 
-      // Restaurar estado anterior
       const qHistory = query(logsRef, where("habitId", "==", habitId), where("userId", "==", userId));
       const historySnap = await getDocs(qHistory);
-      // Buscar la penúltima fecha
       const validDates = historySnap.docs
         .map(d => d.data().completedAt)
         .filter(d => {
@@ -272,15 +253,13 @@ const HabitService = {
     } catch (error) { console.error("Error undo:", error); throw error; }
   },
 
-  // --- REINICIAR HÁBITO NEGATIVO (Esta es la que te fallaba si no estaba definida) ---
   resetNegativeHabit: async (habitId) => {
     try {
       const nowISO = new Date().toISOString();
       const habitRef = doc(db, 'habits', habitId);
-
       await updateDoc(habitRef, {
         currentStreak: 0,
-        lastResetDate: nowISO // Resetear contador
+        lastResetDate: nowISO
       });
     } catch (error) {
       console.error("Error resetting negative habit:", error);
