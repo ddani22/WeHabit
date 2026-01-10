@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import * as ImagePicker from 'expo-image-picker';
-import { doc, onSnapshot, updateDoc } from 'firebase/firestore'; // <--- onSnapshot para tiempo real
+import { doc, onSnapshot, updateDoc } from 'firebase/firestore';
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -30,52 +30,38 @@ export default function ProfileScreen({ navigation }) {
   const { colors } = theme;
   const user = auth.currentUser;
 
-  // Estados de UI (Perfil y XP - Tiempo Real)
   const [userData, setUserData] = useState({
     displayName: user?.displayName || 'Usuario',
     email: user?.email,
     avatar: '👤',
-    totalXP: 0
+    totalXP: 0,
+    streakShields: 0 // Leemos escudos
   });
   const [levelInfo, setLevelInfo] = useState(null);
   const [uploading, setUploading] = useState(false);
-
-  // Estados de Estadísticas (Carga Diferida)
   const [badges, setBadges] = useState([]);
-  const [stats, setStats] = useState({
-    habits: 0,
-    streak: 0,
-    friends: 0
-  });
+  const [stats, setStats] = useState({ habits: 0, streak: 0, friends: 0 });
 
-  // 1. LISTENER EN TIEMPO REAL (Perfil, Avatar, XP)
   useEffect(() => {
     if (!user) return;
-
     const userRef = doc(db, 'users', user.uid);
     const unsubscribe = onSnapshot(userRef, (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
-
-        // Actualizar datos básicos
         setUserData({
           displayName: data.username || user.displayName || 'Usuario',
           email: data.email || user.email,
-          avatar: data.avatar || '👤', // Fallback a emoji si no hay imagen
-          totalXP: data.totalXP || 0
+          avatar: data.avatar || '👤',
+          totalXP: data.totalXP || 0,
+          streakShields: data.streakShields || 0
         });
-
-        // Recalcular nivel instantáneamente
         const info = getLevelInfo(data.totalXP || 0);
         setLevelInfo(info);
       }
     });
-
     return () => unsubscribe();
   }, [user]);
 
-  // 2. CARGA DE ESTADÍSTICAS PESADAS (Al enfocar)
-  // Mantenemos esto separado para no saturar con listeners de colecciones enteras
   useFocusEffect(
     useCallback(() => {
       const loadStatsAndBadges = async () => {
@@ -84,53 +70,28 @@ export default function ProfileScreen({ navigation }) {
           const habits = await HabitService.getUserHabits(user.uid);
           const maxStreak = habits.reduce((max, h) => Math.max(max, h.currentStreak || 0), 0);
           const challenges = await ChallengeService.getMyChallenges(user.uid);
+          const daysSinceCreation = 10;
 
-          // Recuperamos friendList del snapshot anterior o query rápida si es necesario, 
-          // pero aquí podemos leer del userDoc si ya lo tuviéramos. 
-          // Para asegurar frescura completa en medallas, usamos los datos actuales.
+          setStats(prev => ({ ...prev, habits: habits.length, streak: maxStreak }));
 
-          // Cálculo de fechas para medalla "Veterano"
-          // Nota: Idealmente leeríamos 'createdAt' del user snapshot, pero para simplificar:
-          const daysSinceCreation = 10; // Placeholder o leer de userData si lo añadimos al estado
-
-          const currentStats = {
-            habits: habits.length,
-            streak: maxStreak,
-            friends: 0 // Se actualizará si leemos friendList del user
-          };
-
-          setStats(prev => ({
-            ...prev,
-            habits: habits.length,
-            streak: maxStreak
-          }));
-
-          // Calcular Medallas
           const calculationData = {
             habitsCount: habits.length,
             challengesCount: challenges.length,
-            friendsCount: 0, // Placeholder
+            friendsCount: 0,
             maxStreak,
             daysSinceCreation
           };
           const calculatedBadges = GamificationService.calculateBadges(calculationData);
           setBadges(calculatedBadges);
-
-        } catch (error) {
-          console.error("Error stats:", error);
-        }
+        } catch (error) { console.error("Error stats:", error); }
       };
       loadStatsAndBadges();
     }, [])
   );
 
-  // --- MÉTODOS DE IMAGEN ---
   const saveToFirestore = async (newValue) => {
-    try {
-      const userRef = doc(db, 'users', user.uid);
-      await updateDoc(userRef, { avatar: newValue });
-      // No hace falta setAvatar, el listener lo hará
-    } catch (error) { Alert.alert("Error", "No se pudo actualizar"); }
+    try { await updateDoc(doc(db, 'users', user.uid), { avatar: newValue }); }
+    catch (error) { Alert.alert("Error", "No se pudo actualizar"); }
   };
 
   const pickImage = async () => {
@@ -187,19 +148,12 @@ export default function ProfileScreen({ navigation }) {
                 Nvl {levelInfo.level} • {levelInfo.title}
               </Text>
               <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                <Text style={{ color: colors.textSecondary, fontSize: 11, marginRight: 5 }}>
-                  Ver niveles
-                </Text>
+                <Text style={{ color: colors.textSecondary, fontSize: 11, marginRight: 5 }}>Ver niveles</Text>
                 <Ionicons name="chevron-forward" size={12} color={colors.textSecondary} />
               </View>
             </View>
-
             <View style={{ height: 6, backgroundColor: isDark ? '#333' : '#E0E0E0', borderRadius: 3, overflow: 'hidden' }}>
-              <View style={{
-                height: '100%',
-                width: `${Math.min(levelInfo.progress * 100, 100)}%`, // Blindaje visual
-                backgroundColor: levelInfo.color
-              }} />
+              <View style={{ height: '100%', width: `${Math.min(levelInfo.progress * 100, 100)}%`, backgroundColor: levelInfo.color }} />
             </View>
             <Text style={{ color: colors.textSecondary, fontSize: 10, marginTop: 4, textAlign: 'right' }}>
               {levelInfo.currentXP} / {levelInfo.nextLevelXP} XP
@@ -225,7 +179,31 @@ export default function ProfileScreen({ navigation }) {
         </View>
       </View>
 
-      {/* SECCIÓN LOGROS */}
+      {/* --- INVENTARIO DE OBJETOS --- */}
+      <View style={styles.sectionContainer}>
+        <Text style={[styles.sectionTitle, { color: colors.textSecondary, marginBottom: 10 }]}>TU INVENTARIO</Text>
+
+        <View style={[styles.shopCard, { backgroundColor: colors.card, shadowColor: colors.text }]}>
+          <View style={[styles.shopIconBg, { backgroundColor: 'rgba(76, 217, 100, 0.15)' }]}>
+            <Ionicons name="shield-checkmark" size={32} color="#4CD964" />
+          </View>
+          <View style={{ flex: 1, paddingHorizontal: 15 }}>
+            <Text style={[styles.itemTitle, { color: colors.text }]}>Escudo de Racha</Text>
+            <Text style={{ color: colors.textSecondary, fontSize: 13, marginTop: 2 }}>
+              Disponibles: <Text style={{ fontWeight: 'bold', color: '#4CD964', fontSize: 15 }}>{userData.streakShields || 0}</Text>
+            </Text>
+            <Text style={{ color: colors.textSecondary, fontSize: 11, marginTop: 4, fontStyle: 'italic' }}>
+              Se consumen automáticamente si fallas.
+            </Text>
+          </View>
+
+          {/* Badge informativo en vez de botón comprar */}
+          <View style={styles.infoBadge}>
+            <Text style={styles.infoBadgeText}>+1 / NIVEL</Text>
+          </View>
+        </View>
+      </View>
+
       <View style={styles.sectionContainer}>
         <View style={styles.sectionHeaderRow}>
           <Text style={[styles.sectionTitle, { color: colors.textSecondary }]}>LOGROS</Text>
@@ -248,9 +226,7 @@ export default function ProfileScreen({ navigation }) {
             <View style={styles.miniProgressBarBg}>
               <View style={[styles.miniProgressBarFill, { width: `${badges.length > 0 ? (badges.filter(b => b.unlocked).length / badges.length) * 100 : 0}%` }]} />
             </View>
-            <Text style={{ color: colors.textSecondary, fontSize: 11, marginTop: 4 }}>
-              Consulta tu progreso
-            </Text>
+            <Text style={{ color: colors.textSecondary, fontSize: 11, marginTop: 4 }}>Consulta tu progreso</Text>
           </View>
           <View style={[styles.arrowBg, { backgroundColor: isDark ? '#333' : '#F5F5F5' }]}>
             <Ionicons name="chevron-forward" size={18} color={colors.textSecondary} />
@@ -258,10 +234,8 @@ export default function ProfileScreen({ navigation }) {
         </TouchableOpacity>
       </View>
 
-      {/* PREFERENCIAS */}
       <View style={styles.sectionContainer}>
         <Text style={[styles.sectionTitle, { color: colors.textSecondary, marginBottom: 10 }]}>PREFERENCIAS</Text>
-
         <View style={[styles.settingsCard, { backgroundColor: colors.card }]}>
           <Text style={[styles.settingLabel, { color: colors.text, marginBottom: 10 }]}>Avatar Rápido</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false}>
@@ -276,11 +250,7 @@ export default function ProfileScreen({ navigation }) {
             ))}
           </ScrollView>
         </View>
-
-        <TouchableOpacity
-          style={[styles.settingsItem, { backgroundColor: colors.card }]}
-          onPress={toggleTheme}
-        >
+        <TouchableOpacity style={[styles.settingsItem, { backgroundColor: colors.card }]} onPress={toggleTheme}>
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
             <View style={[styles.iconBox, { backgroundColor: isDark ? '#444' : '#FFF3E0' }]}>
               <Ionicons name={isDark ? "moon" : "sunny"} size={18} color={isDark ? "#fff" : "#FF9800"} />
@@ -289,9 +259,7 @@ export default function ProfileScreen({ navigation }) {
           </View>
           <Ionicons name={isDark ? "toggle" : "toggle-outline"} size={28} color={colors.primary} />
         </TouchableOpacity>
-
         <View style={[styles.divider, { backgroundColor: colors.border }]} />
-
         <TouchableOpacity style={styles.settingsItem} onPress={() => AuthService.logout()}>
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
             <View style={[styles.iconBox, { backgroundColor: '#FFEBEE' }]}>
@@ -302,8 +270,7 @@ export default function ProfileScreen({ navigation }) {
           <Ionicons name="chevron-forward" size={20} color={colors.textSecondary} />
         </TouchableOpacity>
       </View>
-
-      <Text style={[styles.version, { color: colors.textSecondary }]}>WeHabit v1.0 • Hecho con ❤️</Text>
+      <Text style={[styles.version, { color: colors.textSecondary }]}>WeHabit v1.0</Text>
     </ScrollView>
   );
 }
@@ -341,5 +308,12 @@ const styles = StyleSheet.create({
   iconBox: { width: 32, height: 32, borderRadius: 10, justifyContent: 'center', alignItems: 'center', marginRight: 12 },
   settingText: { fontSize: 16, fontWeight: '500' },
   divider: { height: 1, marginVertical: 5 },
-  version: { textAlign: 'center', fontSize: 12, marginBottom: 20 }
+  version: { textAlign: 'center', fontSize: 12, marginBottom: 20 },
+
+  // --- NUEVO ESTILO DE INVENTARIO ---
+  shopCard: { flexDirection: 'row', alignItems: 'center', padding: 15, borderRadius: 20, shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 4, elevation: 3 },
+  shopIconBg: { width: 44, height: 44, borderRadius: 22, justifyContent: 'center', alignItems: 'center' },
+  itemTitle: { fontWeight: 'bold', fontSize: 15 },
+  infoBadge: { backgroundColor: 'rgba(255, 152, 0, 0.15)', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
+  infoBadgeText: { color: '#FF9800', fontWeight: 'bold', fontSize: 10 }
 });

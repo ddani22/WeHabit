@@ -36,8 +36,6 @@ import UserService from '../../services/userService';
 const SCREEN_WIDTH = Dimensions.get('window').width;
 
 // --- HELPERS ---
-
-// Fecha Local YYYY-MM-DD
 const getLocalTodayDate = () => {
   const now = new Date();
   const year = now.getFullYear();
@@ -46,12 +44,10 @@ const getLocalTodayDate = () => {
   return `${year}-${month}-${day}`;
 };
 
-// Tiempo Relativo
 const getTimeAgo = (timestamp) => {
   if (!timestamp) return '';
   const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
   const seconds = Math.floor((new Date() - date) / 1000);
-
   if (seconds < 60) return "Ahora";
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes} min`;
@@ -61,7 +57,6 @@ const getTimeAgo = (timestamp) => {
   return `${days} d`;
 };
 
-// Agrupar Feed
 const groupFeedByDate = (feedItems) => {
   const groups = { 'Hoy': [], 'Ayer': [], 'Esta Semana': [], 'Anteriormente': [] };
   const now = new Date();
@@ -126,12 +121,16 @@ export default function SocialScreen({ navigation }) {
     return () => unsubscribe();
   }, [currentUser]);
 
-  // 2. EFECTO FEED
+  // 2. EFECTO FEED (Ahora con onSnapshot para ver reacciones en tiempo real)
   useEffect(() => {
-    if (activeTab === 'feed') loadFeed();
+    if (activeTab === 'feed' && currentUser) {
+      // Nota: Si usamos onSnapshot para el feed, veremos las reacciones al instante.
+      // Para optimizar, podríamos seguir usando getDocs si hay mucha carga, 
+      // pero para "Interacción Social 2.0" necesitamos tiempo real.
+      loadFeedRealTime();
+    }
   }, [activeTab]);
 
-  // CARGA DATOS
   const loadData = async () => {
     try {
       if (!currentUser) return;
@@ -149,32 +148,45 @@ export default function SocialScreen({ navigation }) {
       } else {
         setFriends([]);
       }
-
       const incoming = await UserService.getIncomingRequests(currentUser.uid);
       setRequests(incoming);
-
     } catch (error) { console.error(error); }
     finally { setLoadingData(false); }
   };
 
-  const loadFeed = async () => {
-    if (!currentUser) return;
-    setLoadingFeed(true);
+  // Carga de Feed en Tiempo Real para ver reacciones
+  const loadFeedRealTime = async () => {
     try {
       const userDoc = await getDoc(doc(db, 'users', currentUser.uid));
       const friendIds = userDoc.data()?.friendList || [];
-      const feedIds = [...friendIds, currentUser.uid];
+      const feedIds = [...friendIds, currentUser.uid].slice(0, 10); // Limite seguridad
 
-      const recentActivity = await FeedService.getFriendsFeed(feedIds);
-      setFeed(recentActivity);
-      setGroupedFeed(groupFeedByDate(recentActivity));
+      // Usamos onSnapshot en lugar de getDocs
+      const q = query(
+        collection(db, 'feed'),
+        where('userId', 'in', feedIds),
+        // orderBy no funciona bien con 'in' sin índice complejo a veces, 
+        // si falla, quitar orderBy y ordenar en cliente
+        // orderBy('timestamp', 'desc') 
+      );
+
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        // Ordenar en cliente para evitar problemas de índices complejos por ahora
+        list.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+
+        setFeed(list);
+        setGroupedFeed(groupFeedByDate(list));
+      });
+
+      return () => unsubscribe();
     } catch (e) { console.error("Feed error", e); }
-    finally { setLoadingFeed(false); }
   };
 
   useFocusEffect(useCallback(() => { loadData(); }, []));
 
   // --- ACCIONES ---
+  // ... (Tus acciones anteriores se mantienen: Search, Request, CheckIn, GiveUp) ...
   const handleSearch = async () => {
     if (!searchText.trim()) return;
     setLoading(true);
@@ -186,7 +198,6 @@ export default function SocialScreen({ navigation }) {
       setSearchResults(filtered);
     } catch (e) { Alert.alert("Error", "Fallo al buscar"); } finally { setLoading(false); }
   };
-
   const handleSendRequest = async (targetUser) => {
     try {
       await UserService.sendFriendRequest(currentUser.uid, myProfile?.username, myProfile?.avatar, targetUser.id);
@@ -194,53 +205,51 @@ export default function SocialScreen({ navigation }) {
       setSearchResults(prev => prev.filter(u => u.id !== targetUser.id));
     } catch (error) { Alert.alert("Info", "Error enviando solicitud."); }
   };
-
   const closeModal = () => { setModalVisible(false); setSearchText(''); setSearchResults([]); };
-
   const handleAcceptRequest = async (req) => {
-    try {
-      await UserService.acceptFriendRequest(req.id, req.fromId, currentUser.uid);
-      FeedbackService.triggerSuccess();
-      loadData();
-    } catch (e) { Alert.alert("Error", "Error al aceptar"); }
+    try { await UserService.acceptFriendRequest(req.id, req.fromId, currentUser.uid); FeedbackService.triggerSuccess(); loadData(); }
+    catch (e) { Alert.alert("Error", "Error al aceptar"); }
   };
-
   const handleRejectRequest = async (reqId) => { try { await UserService.rejectFriendRequest(reqId); loadData(); } catch (e) { } };
-
   const handleCheckInToggle = async (challenge, isCompletedToday) => {
     try {
-      if (isCompletedToday) {
-        FeedbackService.triggerImpactLight();
-        await ChallengeService.undoCheckInChallenge(challenge.id, currentUser.uid);
-      } else {
-        FeedbackService.triggerSuccess();
-        await ChallengeService.checkInChallenge(challenge.id, currentUser.uid);
-      }
+      if (isCompletedToday) { FeedbackService.triggerImpactLight(); await ChallengeService.undoCheckInChallenge(challenge.id, currentUser.uid); }
+      else { FeedbackService.triggerSuccess(); await ChallengeService.checkInChallenge(challenge.id, currentUser.uid); }
     } catch (error) { Alert.alert("Error", "No se pudo actualizar."); }
   };
-
   const handleGiveUp = (challenge) => {
     Alert.alert("Abandonar", `¿Rendirse en "${challenge.challengeName}"?`, [
       { text: "Cancelar", style: "cancel" },
       { text: "Rendirse", style: "destructive", onPress: () => ChallengeService.giveUpChallenge(challenge.id, currentUser.uid) }
     ]);
   };
-
   const handleDeleteActivity = (item) => {
     if (item.userId !== currentUser.uid) return;
     Alert.alert("Borrar", "¿Eliminar actividad?", [
       { text: "Cancelar", style: "cancel" },
-      {
-        text: "Eliminar", style: "destructive", onPress: async () => {
-          await FeedService.deleteActivity(item.id);
-          loadFeed();
-        }
-      }
+      { text: "Eliminar", style: "destructive", onPress: async () => { await FeedService.deleteActivity(item.id); } }
     ]);
   };
 
-  // --- RENDERIZADORES ---
+  // --- NUEVA ACCIÓN: REACCIONAR ---
+  const handleReaction = async (item, type) => {
+    FeedbackService.triggerImpactLight(); // Feedback táctil rico
 
+    const myCurrentReaction = item.reactions?.[currentUser.uid];
+    const newReaction = myCurrentReaction === type ? null : type; // Toggle: Si ya es igual, quitar (null)
+
+    // Optimistic Update (Visual) - aunque el onSnapshot lo haría rápido, esto es instantáneo
+    // (Opcional, si usas onSnapshot puedes confiar en él)
+
+    try {
+      await FeedService.toggleReaction(item.id, currentUser.uid, newReaction);
+    } catch (error) {
+      console.error(error);
+      Alert.alert("Error", "No se pudo reaccionar");
+    }
+  };
+
+  // --- RENDERIZADORES ---
   const renderUserAvatar = (avatarUrl, name, size = 40) => {
     if (avatarUrl && typeof avatarUrl === 'string' && avatarUrl.startsWith('http')) {
       return <Image source={{ uri: avatarUrl }} style={{ width: '100%', height: '100%' }} />;
@@ -249,18 +258,13 @@ export default function SocialScreen({ navigation }) {
     return <Text style={{ color: '#0288D1', fontWeight: 'bold', fontSize: size * 0.45 }}>{initial}</Text>;
   };
 
-  // === TARJETA DE RETO PRO (CORREGIDA: NOMBRES VISIBLES) ===
   const renderChallengeItem = ({ item }) => {
     const endDate = new Date(item.endDate);
     const now = new Date();
     const daysLeft = Math.ceil((endDate - now) / (1000 * 60 * 60 * 24));
     const isExpired = daysLeft < 0;
     const today = getLocalTodayDate();
-
-    // Mi estado
     const isCompletedToday = item.myProgress.lastCompletedDate === today;
-
-    // Ordenar: YO primero, luego por PUNTOS
     const sortedParticipants = [...item.participants].sort((a, b) => {
       if (a.userId === currentUser.uid) return -1;
       if (b.userId === currentUser.uid) return 1;
@@ -269,109 +273,54 @@ export default function SocialScreen({ navigation }) {
 
     return (
       <View style={[styles.proCard, { backgroundColor: colors.card, borderColor: isCompletedToday ? '#4CD964' : colors.border }]}>
-
-        {/* Cabecera */}
         <View style={styles.proHeader}>
           <View style={{ flex: 1 }}>
             <Text style={[styles.proTitle, { color: colors.text }]}>{item.challengeName}</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
               <Ionicons name="time-outline" size={12} color={colors.textSecondary} />
-              <Text style={[styles.proSubtitle, { color: colors.textSecondary }]}>
-                {isExpired ? "Finalizado" : ` Quedan ${daysLeft} días`} • Meta: {item.durationDays}
-              </Text>
+              <Text style={[styles.proSubtitle, { color: colors.textSecondary }]}>{isExpired ? "Finalizado" : ` Quedan ${daysLeft} días`} • Meta: {item.durationDays}</Text>
             </View>
           </View>
           <TouchableOpacity onPress={() => handleGiveUp(item)} style={{ padding: 5 }}>
             <Ionicons name="flag-outline" size={18} color={colors.danger} />
           </TouchableOpacity>
         </View>
-
-        {/* Lista de Rivales */}
         <View style={styles.rivalsContainer}>
           {sortedParticipants.map((p) => {
             const isMe = p.userId === currentUser.uid;
             const pDoneToday = p.lastCompletedDate === today;
             const progressPercent = Math.min((p.currentScore || 0) / item.durationDays, 1);
-
-            // CORRECCIÓN: Buscar nombre y avatar real en la lista de amigos
             let displayName = 'Jugador';
             let displayAvatar = null;
-
-            if (isMe) {
-              displayName = 'Tú';
-              displayAvatar = myProfile?.avatar;
-            } else {
-              const friendData = friends.find(f => f.id === p.userId);
-              displayName = friendData?.username || p.username || 'Jugador';
-              displayAvatar = friendData?.avatar;
-            }
+            if (isMe) { displayName = 'Tú'; displayAvatar = myProfile?.avatar; }
+            else { const friendData = friends.find(f => f.id === p.userId); displayName = friendData?.username || p.username || 'Jugador'; displayAvatar = friendData?.avatar; }
 
             return (
               <View key={p.userId} style={styles.rivalRow}>
-                {/* Avatar y Nombre */}
                 <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
-                  <View style={[styles.rivalAvatar, { borderColor: isMe ? colors.primary : 'transparent', borderWidth: isMe ? 2 : 0 }]}>
-                    {renderUserAvatar(displayAvatar, displayName, 24)}
-                  </View>
+                  <View style={[styles.rivalAvatar, { borderColor: isMe ? colors.primary : 'transparent', borderWidth: isMe ? 2 : 0 }]}>{renderUserAvatar(displayAvatar, displayName, 24)}</View>
                   <View style={{ marginLeft: 10, flex: 1 }}>
-                    <Text style={[styles.rivalName, { color: colors.text, fontWeight: isMe ? 'bold' : 'normal' }]}>
-                      {displayName}
-                    </Text>
-                    {/* Barra Progreso Fina */}
-                    <View style={styles.rivalBarBg}>
-                      <View style={[styles.rivalBarFill, { width: `${progressPercent * 100}%`, backgroundColor: isMe ? colors.primary : colors.textSecondary }]} />
-                    </View>
+                    <Text style={[styles.rivalName, { color: colors.text, fontWeight: isMe ? 'bold' : 'normal' }]}>{displayName}</Text>
+                    <View style={styles.rivalBarBg}><View style={[styles.rivalBarFill, { width: `${progressPercent * 100}%`, backgroundColor: isMe ? colors.primary : colors.textSecondary }]} /></View>
                   </View>
                 </View>
-
-                {/* Estado Diario */}
                 <View style={{ alignItems: 'flex-end', minWidth: 60 }}>
-                  {pDoneToday ? (
-                    <View style={styles.statusBadgeDone}>
-                      <Ionicons name="checkmark" size={10} color="#fff" />
-                      <Text style={{ fontSize: 9, color: '#fff', fontWeight: 'bold', marginLeft: 2 }}>HOY</Text>
-                    </View>
-                  ) : (
-                    <View style={styles.statusBadgePending}>
-                      <Text style={{ fontSize: 9, color: '#888' }}>PENDIENTE</Text>
-                    </View>
-                  )}
-                  <Text style={{ fontSize: 10, color: colors.textSecondary, marginTop: 2 }}>
-                    {p.currentScore || 0}/{item.durationDays}
-                  </Text>
+                  {pDoneToday ? <View style={styles.statusBadgeDone}><Ionicons name="checkmark" size={10} color="#fff" /><Text style={{ fontSize: 9, color: '#fff', fontWeight: 'bold', marginLeft: 2 }}>HOY</Text></View> : <View style={styles.statusBadgePending}><Text style={{ fontSize: 9, color: '#888' }}>PENDIENTE</Text></View>}
+                  <Text style={{ fontSize: 10, color: colors.textSecondary, marginTop: 2 }}>{p.currentScore || 0}/{item.durationDays}</Text>
                 </View>
               </View>
             );
           })}
         </View>
-
-        {/* Botón de Acción Grande */}
-        <TouchableOpacity
-          onPress={() => handleCheckInToggle(item, isCompletedToday)}
-          activeOpacity={0.8}
-          style={[
-            styles.proButton,
-            {
-              backgroundColor: isCompletedToday ? '#4CD964' : (isDark ? '#333' : '#F2F2F7'),
-              shadowColor: isCompletedToday ? '#4CD964' : '#000'
-            }
-          ]}
-        >
-          <Text style={{
-            color: isCompletedToday ? '#fff' : colors.text,
-            fontWeight: 'bold',
-            fontSize: 14
-          }}>
-            {isCompletedToday ? "¡COMPLETADO HOY!" : "MARCAR COMO HECHO"}
-          </Text>
+        <TouchableOpacity onPress={() => handleCheckInToggle(item, isCompletedToday)} activeOpacity={0.8} style={[styles.proButton, { backgroundColor: isCompletedToday ? '#4CD964' : (isDark ? '#333' : '#F2F2F7'), shadowColor: isCompletedToday ? '#4CD964' : '#000' }]}>
+          <Text style={{ color: isCompletedToday ? '#fff' : colors.text, fontWeight: 'bold', fontSize: 14 }}>{isCompletedToday ? "¡COMPLETADO HOY!" : "MARCAR COMO HECHO"}</Text>
           {isCompletedToday && <Ionicons name="checkmark-circle" size={18} color="#fff" style={{ marginLeft: 8 }} />}
         </TouchableOpacity>
-
       </View>
     );
   };
 
-  // Render Feed
+  // === RENDER FEED ACTUALIZADO (REACCIONES) ===
   const renderFeedItem = ({ item }) => {
     const isChallenge = item.title.toLowerCase().includes('reto') || item.title.toLowerCase().includes('duelo') || (item.type && item.type.includes('challenge'));
     const isStreak = item.title.toLowerCase().includes('racha');
@@ -382,23 +331,62 @@ export default function SocialScreen({ navigation }) {
     if (isChallenge) { iconName = 'trophy'; iconColor = '#FFD700'; borderColor = 'rgba(255, 215, 0, 0.3)'; }
     else if (isStreak) { iconName = 'flame'; iconColor = '#FF3B30'; }
 
+    // Calcular Reacciones
+    const reactions = item.reactions || {};
+    const myReaction = reactions[currentUser.uid];
+
+    // Contadores
+    const fireCount = Object.values(reactions).filter(v => v === 'fire').length;
+    const clapCount = Object.values(reactions).filter(v => v === 'clap').length;
+
     return (
-      <TouchableOpacity onLongPress={() => handleDeleteActivity(item)} activeOpacity={0.8} style={[styles.feedCard, { backgroundColor: colors.card, borderColor: borderColor, borderWidth: isChallenge ? 1 : 0 }]}>
-        <View style={styles.feedAvatarContainer}>
-          {renderUserAvatar(item.avatar, item.username, 40)}
-          <View style={[styles.miniBadge, { backgroundColor: colors.card }]}><Ionicons name={iconName} size={10} color={iconColor} /></View>
-        </View>
-        <View style={{ flex: 1, paddingHorizontal: 12 }}>
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-            <Text style={[styles.feedUser, { color: colors.text }]} numberOfLines={1}>{item.username}</Text>
-            <Text style={{ fontSize: 10, color: colors.textSecondary }}>{getTimeAgo(item.timestamp)}</Text>
+      <View style={[styles.feedCard, { backgroundColor: colors.card, borderColor: borderColor, borderWidth: isChallenge ? 1 : 0 }]}>
+
+        {/* Parte Superior: Contenido (Clic largo para borrar si es mío) */}
+        <TouchableOpacity
+          onLongPress={() => handleDeleteActivity(item)}
+          activeOpacity={1}
+          style={{ flexDirection: 'row', marginBottom: 10 }}
+        >
+          <View style={styles.feedAvatarContainer}>
+            {renderUserAvatar(item.avatar, item.username, 40)}
+            <View style={[styles.miniBadge, { backgroundColor: colors.card }]}><Ionicons name={iconName} size={10} color={iconColor} /></View>
           </View>
-          <Text style={[styles.feedText, { color: colors.textSecondary }]} numberOfLines={2}>
-            {item.title.replace(item.username, '').trim()}
-            {item.description ? <Text style={{ fontWeight: 'bold', color: isChallenge ? '#FFD700' : colors.primary }}> {item.description}</Text> : null}
-          </Text>
+          <View style={{ flex: 1, paddingHorizontal: 12 }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+              <Text style={[styles.feedUser, { color: colors.text }]} numberOfLines={1}>{item.username}</Text>
+              <Text style={{ fontSize: 10, color: colors.textSecondary }}>{getTimeAgo(item.timestamp)}</Text>
+            </View>
+            <Text style={[styles.feedText, { color: colors.textSecondary }]} numberOfLines={2}>
+              {item.title.replace(item.username, '').trim()}
+              {item.description ? <Text style={{ fontWeight: 'bold', color: isChallenge ? '#FFD700' : colors.primary }}> {item.description}</Text> : null}
+            </Text>
+          </View>
+        </TouchableOpacity>
+
+        {/* Parte Inferior: Botones de Reacción */}
+        <View style={[styles.reactionsRow, { borderTopColor: isDark ? '#333' : '#f0f0f0' }]}>
+
+          {/* Botón Fuego */}
+          <TouchableOpacity
+            style={[styles.reactionBtn, myReaction === 'fire' && { backgroundColor: 'rgba(255, 59, 48, 0.1)' }]}
+            onPress={() => handleReaction(item, 'fire')}
+          >
+            <Ionicons name="flame" size={18} color={myReaction === 'fire' ? '#FF3B30' : colors.textSecondary} />
+            {fireCount > 0 && <Text style={[styles.reactionCount, { color: myReaction === 'fire' ? '#FF3B30' : colors.textSecondary }]}>{fireCount}</Text>}
+          </TouchableOpacity>
+
+          {/* Botón Aplauso */}
+          <TouchableOpacity
+            style={[styles.reactionBtn, myReaction === 'clap' && { backgroundColor: 'rgba(76, 217, 100, 0.1)' }]}
+            onPress={() => handleReaction(item, 'clap')}
+          >
+            <Ionicons name="hand-left" size={18} color={myReaction === 'clap' ? '#4CD964' : colors.textSecondary} />
+            {clapCount > 0 && <Text style={[styles.reactionCount, { color: myReaction === 'clap' ? '#4CD964' : colors.textSecondary }]}>{clapCount}</Text>}
+          </TouchableOpacity>
+
         </View>
-      </TouchableOpacity>
+      </View>
     );
   };
 
@@ -408,7 +396,7 @@ export default function SocialScreen({ navigation }) {
     </View>
   );
 
-  // Auxiliares
+  // ... (Render Friends/Search/Requests igual que antes) ...
   const renderFriendItem = ({ item }) => (
     <View style={[styles.friendCard, { backgroundColor: colors.card }]}>
       <View style={[styles.avatarMedium, { backgroundColor: isDark ? '#333' : '#E1F5FE', overflow: 'hidden' }]}>{renderUserAvatar(item.avatar, item.username, 44)}</View>
@@ -488,7 +476,7 @@ export default function SocialScreen({ navigation }) {
 
         {activeTab === 'feed' && (
           <View style={{ flex: 1 }}>
-            {loadingFeed ? (
+            {loadingFeed && feed.length === 0 ? (
               <View style={{ marginTop: 50 }}><ActivityIndicator color={colors.primary} size="large" /></View>
             ) : (
               <SectionList
@@ -541,37 +529,35 @@ const styles = StyleSheet.create({
   group: { marginBottom: 25 },
   label: { fontSize: 13, fontWeight: '700', color: '#888', marginBottom: 10, textTransform: 'uppercase' },
 
-  // --- TARJETA PRO (RETO) ESTILOS ---
   proCard: { borderRadius: 24, padding: 18, marginBottom: 20, borderWidth: 1.5, shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.08, shadowRadius: 10, elevation: 4 },
   proHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20, borderBottomWidth: 1, borderBottomColor: 'rgba(0,0,0,0.05)', paddingBottom: 12 },
   proTitle: { fontSize: 20, fontWeight: '800', letterSpacing: 0.5 },
   proSubtitle: { fontSize: 12, fontWeight: '500', marginLeft: 4 },
-
   rivalsContainer: { marginBottom: 20, gap: 12 },
   rivalRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   rivalAvatar: { width: 32, height: 32, borderRadius: 16, backgroundColor: '#eee', justifyContent: 'center', alignItems: 'center', overflow: 'hidden' },
   rivalName: { fontSize: 14, marginBottom: 4 },
   rivalBarBg: { height: 4, width: 100, backgroundColor: 'rgba(0,0,0,0.1)', borderRadius: 2 },
   rivalBarFill: { height: '100%', borderRadius: 2 },
-
   statusBadgeDone: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#4CD964', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8 },
   statusBadgePending: { backgroundColor: 'rgba(0,0,0,0.05)', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8 },
-
   proButton: { flexDirection: 'row', height: 50, borderRadius: 16, justifyContent: 'center', alignItems: 'center', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 8, elevation: 4 },
 
-  // --- FIN TARJETA PRO ---
-
-  friendCard: { flexDirection: 'row', alignItems: 'center', padding: 12, borderRadius: 16, marginBottom: 10 },
-  requestCard: { flexDirection: 'row', alignItems: 'center', padding: 15, borderRadius: 16, marginBottom: 12 },
-
-  feedCard: { padding: 15, borderRadius: 16, marginBottom: 10, flexDirection: 'row', alignItems: 'center', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 4, elevation: 2 },
+  feedCard: { borderRadius: 16, marginBottom: 10, shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 4, elevation: 2, padding: 15 },
   feedAvatarContainer: { width: 40, height: 40, position: 'relative' },
   miniBadge: { position: 'absolute', bottom: -2, right: -2, width: 16, height: 16, borderRadius: 8, justifyContent: 'center', alignItems: 'center', elevation: 2 },
   feedUser: { fontSize: 14, fontWeight: 'bold', marginBottom: 2 },
   feedText: { fontSize: 13, lineHeight: 18 },
+
+  // --- ESTILOS REACCIONES ---
+  reactionsRow: { flexDirection: 'row', marginTop: 10, paddingTop: 8, borderTopWidth: 1 },
+  reactionBtn: { flexDirection: 'row', alignItems: 'center', marginRight: 15, padding: 6, borderRadius: 12 },
+  reactionCount: { fontSize: 12, marginLeft: 4, fontWeight: 'bold' },
+
   sectionHeader: { paddingVertical: 10, paddingHorizontal: 5, marginBottom: 5 },
   sectionHeaderText: { fontSize: 12, fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: 1 },
-
+  friendCard: { flexDirection: 'row', alignItems: 'center', padding: 12, borderRadius: 16, marginBottom: 10 },
+  requestCard: { flexDirection: 'row', alignItems: 'center', padding: 15, borderRadius: 16, marginBottom: 12 },
   avatarMedium: { width: 44, height: 44, borderRadius: 22, justifyContent: 'center', alignItems: 'center' },
   avatarSmall: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center', overflow: 'hidden' },
   textBold: { fontWeight: '600', fontSize: 16 },
@@ -581,7 +567,6 @@ const styles = StyleSheet.create({
   emptyText: { color: '#888', marginTop: 10 },
   requestRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 12, borderRadius: 12, marginBottom: 10, borderWidth: 1 },
   userRow: { flexDirection: 'row', alignItems: 'center', padding: 12, marginBottom: 5, borderRadius: 12 },
-
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
   modalContent: { width: '90%', height: '60%', borderRadius: 25, padding: 20, elevation: 10 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 20 },

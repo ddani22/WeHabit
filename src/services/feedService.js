@@ -2,25 +2,21 @@ import {
     addDoc,
     collection,
     deleteDoc,
+    deleteField,
+    doc,
     getDocs,
     limit,
     orderBy,
     query,
     serverTimestamp,
+    updateDoc,
     where
 } from 'firebase/firestore';
 import { db } from '../../firebaseConfig';
 
 const FeedService = {
     /**
-     * Registra una actividad en el feed público.
-     * @param {string} userId - ID del usuario
-     * @param {string} username - Nombre a mostrar
-     * @param {string} avatar - URL del avatar
-     * @param {string} type - 'habit_done' | 'challenge_won' | 'challenge_progress'
-     * @param {string} title - Título principal (ej. "Completó: Leer")
-     * @param {string} description - Subtítulo (ej. "Racha de 5 días")
-     * @param {string} relatedId - (OPCIONAL) ID del hábito o reto para poder borrarlo luego si se hace Undo
+     * Registra actividad
      */
     logActivity: async (userId, username, avatar, type, title, description = '', relatedId = null) => {
         try {
@@ -31,26 +27,19 @@ const FeedService = {
                 type,
                 title,
                 description,
-                relatedId, // <--- CLAVE: Guardamos el ID del objeto original
+                relatedId,
+                reactions: {}, // Inicializamos el mapa de reacciones vacío
                 timestamp: serverTimestamp()
             });
         } catch (error) {
             console.error("Error logging activity:", error);
-            // No lanzamos error para no bloquear la app por un log fallido
         }
     },
 
-    /**
-     * OBTIENE EL FEED DE AMIGOS
-     */
     getFriendsFeed: async (friendIds) => {
         try {
-            // Nota: Firestore tiene límite de 10 items en 'in'. 
-            // En producción real, esto se haría con paginación o backend functions.
-            // Aquí cogemos los últimos 20 globales de esos amigos.
             if (!friendIds || friendIds.length === 0) return [];
-
-            // Cortamos a 10 para evitar crash de Firestore en demo
+            // Limitamos a 10 amigos para la query 'in' por seguridad
             const safeIds = friendIds.slice(0, 10);
 
             const q = query(
@@ -69,47 +58,55 @@ const FeedService = {
     },
 
     /**
-   * BORRADO ROBUSTO (SIN ÍNDICES COMPLEJOS)
-   * Busca por ID de objeto y filtra en memoria para asegurar el borrado.
-   */
+     * NUEVO: GESTIONAR REACCIONES
+     * toggleReaction('feed123', 'userABC', 'fire')
+     */
+    toggleReaction: async (feedId, userId, reactionType) => {
+        try {
+            const feedRef = doc(db, 'feed', feedId);
+
+            // La clave del mapa será el userId
+            const fieldPath = `reactions.${userId}`;
+
+            // Si queremos alternar (si ya existe, borrarlo? o cambiarlo?)
+            // Estrategia simple: Escribimos el nuevo valor. 
+            // Si queremos hacer toggle (quitar si ya está), lo haríamos en la UI antes de llamar aquí 
+            // o enviamos 'null' para borrar.
+
+            if (reactionType === null) {
+                // Borrar reacción
+                await updateDoc(feedRef, {
+                    [fieldPath]: deleteField()
+                });
+            } else {
+                // Poner reacción (fire, clap, etc.)
+                await updateDoc(feedRef, {
+                    [fieldPath]: reactionType
+                });
+            }
+        } catch (error) {
+            console.error("Error reacting:", error);
+            throw error;
+        }
+    },
+
     removeLog: async (userId, type, relatedId) => {
         try {
             if (!relatedId) return;
-
-            // 1. Buscamos SOLO por relatedId (Esto usa el índice automático, no falla nunca)
-            const q = query(
-                collection(db, 'feed'),
-                where('relatedId', '==', relatedId)
-            );
-
+            const q = query(collection(db, 'feed'), where('relatedId', '==', relatedId));
             const snapshot = await getDocs(q);
-
-            // 2. Filtramos en memoria para asegurar que sea TU log y del tipo correcto
             const docsToDelete = snapshot.docs.filter(doc => {
                 const data = doc.data();
                 return data.userId === userId && data.type === type;
             });
-
-            // 3. Borramos los duplicados si los hubiera
             const deletePromises = docsToDelete.map(doc => deleteDoc(doc.ref));
             await Promise.all(deletePromises);
-
-            console.log(`Feed limpiado: ${deletePromises.length} elementos eliminados.`);
-
-        } catch (error) {
-            console.error("Error removing log:", error);
-        }
+        } catch (error) { console.error("Error removing log:", error); }
     },
-    /**
-     * Borrar manualmente (para la pulsación larga del admin)
-     */
+
     deleteActivity: async (feedId) => {
-        try {
-            await deleteDoc(doc(db, 'feed', feedId));
-        } catch (error) {
-            console.error(error);
-            throw error;
-        }
+        try { await deleteDoc(doc(db, 'feed', feedId)); }
+        catch (error) { throw error; }
     }
 };
 

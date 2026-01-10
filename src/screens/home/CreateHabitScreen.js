@@ -1,284 +1,201 @@
-import GraphemeSplitter from 'grapheme-splitter';
-import { useEffect, useState } from 'react';
+import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useState } from 'react';
 import {
-  ActivityIndicator,
   Alert,
-  Modal,
   ScrollView,
   StyleSheet,
-  Text, TextInput, TouchableOpacity,
+  Text,
+  TextInput,
+  TouchableOpacity,
   View
 } from 'react-native';
 import { auth } from '../../../firebaseConfig';
 import { useTheme } from '../../context/ThemeContext';
 import HabitService from '../../services/habitService';
-import UserService from '../../services/userService';
 
-const splitter = new GraphemeSplitter();
-
-const DAYS = [
-  { id: 1, label: 'L' }, { id: 2, label: 'M' }, { id: 3, label: 'X' },
-  { id: 4, label: 'J' }, { id: 5, label: 'V' }, { id: 6, label: 'S' }, { id: 0, label: 'D' }
-];
-
-// Paleta de colores para que el usuario elija
-const COLOR_PALETTE = [
-  '#FF3B30', '#FF9500', '#FFCC00', '#4CD964', '#5AC8FA', '#007AFF', '#5856D6', '#FF2D55', '#A2845E', '#8E8E93'
-];
-
-export default function CreateHabitScreen({ route, navigation }) {
-  const { theme, isDark } = useTheme();
+export default function CreateHabitScreen({ navigation, route }) {
+  const { theme } = useTheme();
   const { colors } = theme;
   const user = auth.currentUser;
 
   const habitToEdit = route.params?.habitToEdit;
-  const isEditing = !!habitToEdit;
 
-  // Estados del formulario
-  const [name, setName] = useState(isEditing ? habitToEdit.name : '');
-  const [icon, setIcon] = useState(isEditing ? habitToEdit.icon : '💪');
-  const [frequency, setFrequency] = useState(isEditing ? habitToEdit.frequency : [1, 2, 3, 4, 5]);
+  // Estados
+  const [name, setName] = useState(habitToEdit?.name || '');
 
-  // Estado de Categorías
-  const [categories, setCategories] = useState([]);
-  const [selectedCategory, setSelectedCategory] = useState(null);
+  // Icono: Libre escritura (Cualquier emoji del teclado)
+  const [icon, setIcon] = useState(habitToEdit?.icon || '✨');
 
-  // Estado del Modal de Nueva Categoría
-  const [modalVisible, setModalVisible] = useState(false);
-  const [newCatName, setNewCatName] = useState('');
-  const [newCatColor, setNewCatColor] = useState(COLOR_PALETTE[0]);
+  const [frequency, setFrequency] = useState(habitToEdit?.frequency || 'daily');
 
-  const [loading, setLoading] = useState(false);
+  // Categoría: Totalmente personalizada
+  const [categoryName, setCategoryName] = useState(habitToEdit?.categoryLabel || 'General');
+  const [categoryColor, setCategoryColor] = useState(habitToEdit?.categoryColor || '#8E8E93');
 
-  useEffect(() => {
-    navigation.setOptions({ title: isEditing ? 'Editar Hábito' : 'Nuevo Hábito' });
-    loadCategories();
-  }, []);
+  // Paleta de colores para elegir (puedes añadir más)
+  const COLOR_PALETTE = [
+    '#FF3B30', // Rojo
+    '#FF9500', // Naranja
+    '#FFCC00', // Amarillo
+    '#4CD964', // Verde
+    '#5AC8FA', // Azul Claro
+    '#007AFF', // Azul
+    '#5856D6', // Morado
+    '#FF2D55', // Rosa
+    '#8E8E93', // Gris
+    '#A2845E', // Marrón
+    '#333333'  // Negro
+  ];
 
-  const loadCategories = async () => {
-    // 1. Cargamos las categorías guardadas del usuario
-    const userCats = await UserService.getUserCategories(user.uid);
-
-    // 2. Si no tiene ninguna, podemos poner unas por defecto o dejarlo vacío
-    // Para este ejemplo, fusionamos con una "General" básica
-    const allCats = [
-      { id: 'default', label: 'General', color: '#8E8E93' },
-      ...userCats
-    ];
-    setCategories(allCats);
-
-    // 3. Pre-seleccionar
-    if (isEditing && habitToEdit.categoryId) {
-      const found = allCats.find(c => c.id === habitToEdit.categoryId);
-      setSelectedCategory(found || allCats[0]);
-    } else {
-      setSelectedCategory(allCats[0]);
+  const handleSave = async () => {
+    if (!name.trim()) {
+      Alert.alert("Falta información", "Ponle un nombre al hábito.");
+      return;
     }
-  };
+    if (!categoryName.trim()) {
+      Alert.alert("Categoría", "Ponle nombre a la categoría.");
+      return;
+    }
 
-  const handleCreateCategory = async () => {
-    if (!newCatName.trim()) return Alert.alert("Falta nombre", "Ponle nombre a la categoría");
-
-    const newCat = {
-      id: Date.now().toString(), // ID único simple
-      label: newCatName,
-      color: newCatColor
+    // Construimos la categoría personalizada al vuelo
+    const catId = categoryName.toLowerCase().replace(/\s+/g, '_'); // ID basado en el nombre
+    const finalCategory = {
+      id: catId,
+      label: categoryName,
+      color: categoryColor
     };
 
     try {
-      await UserService.addCustomCategory(user.uid, newCat);
-      setCategories([...categories, newCat]); // Actualizamos lista local
-      setSelectedCategory(newCat); // La seleccionamos automáticamente
-      setModalVisible(false);
-      setNewCatName('');
-    } catch (e) {
-      Alert.alert("Error", "No se pudo crear la categoría");
-    }
-  };
-
-  const handleSave = async () => {
-    if (!name.trim()) return Alert.alert("Error", "Ponle nombre.");
-    if (frequency.length === 0) return Alert.alert("Error", "Selecciona días.");
-
-    setLoading(true);
-    try {
-      // Preparamos el objeto de datos de categoría para guardar
-      const categoryData = {
-        id: selectedCategory.id,
-        label: selectedCategory.label,
-        color: selectedCategory.color
-      };
-
-      if (isEditing) {
+      if (habitToEdit) {
         await HabitService.updateHabit(habitToEdit.id, {
-          name, icon, frequency,
-          // Guardamos los campos desglosados
-          categoryId: categoryData.id,
-          categoryLabel: categoryData.label,
-          categoryColor: categoryData.color
+          name, frequency, icon,
+          categoryId: finalCategory.id,
+          categoryLabel: finalCategory.label,
+          categoryColor: finalCategory.color
         });
       } else {
-        await HabitService.createHabit(user.uid, name, frequency, icon, categoryData);
+        await HabitService.createHabit(
+          user.uid, name, frequency, icon, finalCategory
+        );
       }
       navigation.goBack();
     } catch (error) {
       Alert.alert("Error", "No se pudo guardar.");
-    } finally {
-      setLoading(false);
     }
   };
 
-  const toggleDay = (dayId) => {
-    if (frequency.includes(dayId)) setFrequency(frequency.filter(id => id !== dayId));
-    else setFrequency([...frequency, dayId]);
-  };
-
   return (
-    <View style={{ flex: 1, backgroundColor: colors.background }}>
-      <ScrollView contentContainerStyle={styles.container}>
-        <Text style={[styles.label, { color: colors.text }]}>Nombre del Hábito</Text>
+    <ScrollView style={[styles.container, { backgroundColor: colors.background }]}>
+      <View style={styles.header}>
+        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
+          <Ionicons name="close" size={28} color={colors.text} />
+        </TouchableOpacity>
+        <Text style={[styles.title, { color: colors.text }]}>
+          {habitToEdit ? 'Editar Hábito' : 'Nuevo Hábito'}
+        </Text>
+      </View>
+
+      {/* TARJETA 1: QUÉ VAMOS A HACER */}
+      <View style={[styles.card, { backgroundColor: colors.card }]}>
+        <Text style={[styles.label, { color: colors.textSecondary }]}>NOMBRE E ICONO</Text>
+
+        <View style={styles.row}>
+          {/* INPUT ICONO (Editable) */}
+          <View style={[styles.iconInputContainer, { backgroundColor: categoryColor }]}>
+            <TextInput
+              style={styles.iconInput}
+              value={icon}
+              onChangeText={setIcon}
+              maxLength={2} // Para que no escriban textos largos, solo emojis
+              selectTextOnFocus
+              textAlign="center"
+            />
+          </View>
+
+          {/* INPUT NOMBRE */}
+          <TextInput
+            style={[styles.nameInput, { color: colors.text }]}
+            placeholder="Ej. Leer, Meditar..."
+            placeholderTextColor={colors.textSecondary}
+            value={name}
+            onChangeText={setName}
+            autoFocus={!habitToEdit}
+          />
+        </View>
+      </View>
+
+      {/* TARJETA 2: CATEGORÍA PERSONALIZADA */}
+      <View style={[styles.card, { backgroundColor: colors.card }]}>
+        <Text style={[styles.label, { color: colors.textSecondary }]}>CATEGORÍA & COLOR</Text>
+
+        {/* Nombre de la Categoría */}
         <TextInput
-          style={[styles.input, { backgroundColor: isDark ? '#1E1E1E' : '#f0f0f0', color: colors.text }]}
-          placeholder="Ej. Leer 15 minutos"
+          style={[styles.catNameInput, { color: colors.text, borderColor: colors.border }]}
+          placeholder="Nombre de la categoría (Ej. Deportes)"
           placeholderTextColor={colors.textSecondary}
-          value={name} onChangeText={setName} autoFocus={!isEditing}
+          value={categoryName}
+          onChangeText={setCategoryName}
         />
 
-        <Text style={[styles.label, { color: colors.text }]}>Icono</Text>
-        <TextInput
-          style={[styles.emojiInput, { backgroundColor: isDark ? '#1E1E1E' : '#f0f0f0', color: colors.text }]}
-          value={icon}
-          onChangeText={(text) => {
-            if (!text) { setIcon(''); return; }
-            const g = splitter.splitGraphemes(text);
-            setIcon(g.pop());
-          }}
-        />
-
-        {/* SELECTOR DE CATEGORÍA DINÁMICO */}
-        <Text style={[styles.label, { color: colors.text }]}>Categoría</Text>
-        <View style={styles.categoriesContainer}>
-          {categories.map((cat) => (
+        {/* Selector de Color */}
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.colorsRow}>
+          {COLOR_PALETTE.map(color => (
             <TouchableOpacity
-              key={cat.id}
+              key={color}
               style={[
-                styles.categoryChip,
-                selectedCategory?.id === cat.id && { backgroundColor: cat.color, borderColor: cat.color },
-                { borderColor: isDark ? '#333' : '#e0e0e0' }
+                styles.colorCircle,
+                { backgroundColor: color },
+                categoryColor === color && styles.colorSelected
               ]}
-              onPress={() => setSelectedCategory(cat)}
+              onPress={() => setCategoryColor(color)}
             >
-              <Text style={[
-                styles.categoryText,
-                selectedCategory?.id === cat.id ? { color: '#fff' } : { color: colors.textSecondary }
-              ]}>
-                {cat.label}
-              </Text>
+              {categoryColor === color && <Ionicons name="checkmark" size={16} color="#fff" />}
             </TouchableOpacity>
           ))}
+        </ScrollView>
+      </View>
 
-          {/* Botón para crear nueva */}
-          <TouchableOpacity
-            style={[styles.categoryChip, { borderColor: colors.primary, borderStyle: 'dashed' }]}
-            onPress={() => setModalVisible(true)}
-          >
-            <Text style={{ color: colors.primary, fontWeight: 'bold' }}>+ Nueva</Text>
-          </TouchableOpacity>
-        </View>
+      <View style={{ height: 30 }} />
 
-        <Text style={[styles.label, { color: colors.text }]}>Frecuencia</Text>
-        <View style={styles.daysContainer}>
-          {DAYS.map((day) => {
-            const isSelected = frequency.includes(day.id);
-            return (
-              <TouchableOpacity
-                key={day.id}
-                style={[
-                  styles.dayButton,
-                  { backgroundColor: isSelected ? '#4A90E2' : (isDark ? '#333' : '#eee') }
-                ]}
-                onPress={() => toggleDay(day.id)}
-              >
-                <Text style={[styles.dayText, { color: isSelected ? '#fff' : colors.text }]}>{day.label}</Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-
-        <TouchableOpacity
-          style={[styles.createButton, { backgroundColor: isDark ? '#fff' : '#333' }]}
-          onPress={handleSave} disabled={loading}
+      <TouchableOpacity onPress={handleSave} activeOpacity={0.8}>
+        <LinearGradient
+          colors={[categoryColor, categoryColor]} // El botón hereda el color elegido
+          style={styles.saveBtn}
         >
-          {loading ? <ActivityIndicator color={isDark ? '#000' : '#fff'} /> : (
-            <Text style={[styles.btnText, { color: isDark ? '#000' : '#fff' }]}>
-              {isEditing ? 'GUARDAR CAMBIOS' : 'CREAR HÁBITO'}
-            </Text>
-          )}
-        </TouchableOpacity>
-      </ScrollView>
+          <Text style={styles.saveText}>
+            {habitToEdit ? 'Guardar Cambios' : 'Crear Hábito'}
+          </Text>
+        </LinearGradient>
+      </TouchableOpacity>
 
-      {/* MODAL DE CREAR CATEGORÍA */}
-      <Modal visible={modalVisible} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { backgroundColor: colors.card }]}>
-            <Text style={[styles.modalTitle, { color: colors.text }]}>Nueva Categoría</Text>
-
-            <TextInput
-              placeholder="Nombre (Ej. Arte)"
-              placeholderTextColor={colors.textSecondary}
-              style={[styles.input, { backgroundColor: isDark ? '#333' : '#f0f0f0', color: colors.text, width: '100%' }]}
-              value={newCatName}
-              onChangeText={setNewCatName}
-            />
-
-            <Text style={{ color: colors.textSecondary, marginTop: 15, marginBottom: 10 }}>Elige un color:</Text>
-            <View style={styles.colorGrid}>
-              {COLOR_PALETTE.map(color => (
-                <TouchableOpacity
-                  key={color}
-                  style={[
-                    styles.colorCircle,
-                    { backgroundColor: color },
-                    newCatColor === color && { borderWidth: 3, borderColor: colors.text }
-                  ]}
-                  onPress={() => setNewCatColor(color)}
-                />
-              ))}
-            </View>
-
-            <View style={styles.modalButtons}>
-              <TouchableOpacity onPress={() => setModalVisible(false)} style={{ padding: 10 }}>
-                <Text style={{ color: colors.danger }}>Cancelar</Text>
-              </TouchableOpacity>
-              <TouchableOpacity onPress={handleCreateCategory} style={{ padding: 10, backgroundColor: colors.primary, borderRadius: 8 }}>
-                <Text style={{ color: '#fff', fontWeight: 'bold' }}>Crear</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-    </View>
+      <View style={{ height: 60 }} />
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { padding: 20 },
-  label: { fontSize: 16, fontWeight: 'bold', marginBottom: 10, marginTop: 20 },
-  input: { padding: 15, borderRadius: 10, fontSize: 16 },
-  emojiInput: { padding: 15, borderRadius: 10, fontSize: 30, textAlign: 'center', width: 80 },
-  daysContainer: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 5 },
-  dayButton: { width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center' },
-  dayText: { fontWeight: 'bold' },
-  createButton: { padding: 18, borderRadius: 12, alignItems: 'center', marginTop: 40 },
-  btnText: { fontWeight: 'bold', fontSize: 16 },
-  categoriesContainer: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 5 },
-  categoryChip: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 20, borderWidth: 1, marginBottom: 5 },
-  categoryText: { fontSize: 14, fontWeight: '600' },
-  // Modal Styles
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
-  modalContent: { width: '80%', padding: 20, borderRadius: 20, alignItems: 'center' },
-  modalTitle: { fontSize: 18, fontWeight: 'bold', marginBottom: 20 },
-  colorGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, justifyContent: 'center', marginBottom: 20 },
-  colorCircle: { width: 30, height: 30, borderRadius: 15 },
-  modalButtons: { flexDirection: 'row', justifyContent: 'space-between', width: '100%', alignItems: 'center' }
+  container: { flex: 1, padding: 20 },
+  header: { flexDirection: 'row', alignItems: 'center', marginTop: 40, marginBottom: 20 },
+  backButton: { marginRight: 15 },
+  title: { fontSize: 28, fontWeight: '800' },
+
+  card: { borderRadius: 20, padding: 20, marginBottom: 20, shadowColor: "#000", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 8, elevation: 2 },
+  label: { fontSize: 12, fontWeight: '700', marginBottom: 15, letterSpacing: 1 },
+
+  row: { flexDirection: 'row', alignItems: 'center' },
+
+  iconInputContainer: { width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', marginRight: 15 },
+  iconInput: { fontSize: 30 },
+
+  nameInput: { flex: 1, fontSize: 18, fontWeight: '600', paddingVertical: 10 },
+
+  catNameInput: { borderWidth: 1, borderRadius: 12, padding: 12, fontSize: 16, marginBottom: 15 },
+
+  colorsRow: { flexDirection: 'row' },
+  colorCircle: { width: 40, height: 40, borderRadius: 20, marginRight: 10, justifyContent: 'center', alignItems: 'center' },
+  colorSelected: { borderWidth: 3, borderColor: 'rgba(255,255,255,0.8)' },
+
+  saveBtn: { padding: 18, borderRadius: 16, alignItems: 'center', shadowOpacity: 0.3, shadowOffset: { width: 0, height: 4 }, shadowRadius: 8, elevation: 5 },
+  saveText: { color: '#fff', fontSize: 18, fontWeight: 'bold' }
 });

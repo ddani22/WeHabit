@@ -176,24 +176,63 @@ export default function HomeScreen({ navigation }) {
   const progressPercent = totalHabits > 0 ? Math.round((completedCount / totalHabits) * 100) : 0;
   const totalRachas = habits.reduce((acc, h) => acc + (h.currentStreak || 0), 0);
 
-  // --- RENDERIZADORES ---
+  // --- RENDERIZADOR HÁBITO (HÍBRIDO POSITIVO/NEGATIVO) ---
   const renderMiniHabit = (item) => {
+    const isNegative = item.type === 'negative';
     const isCompleted = completedIds.includes(item.id);
+
+    // ACCIÓN HÁBITO NEGATIVO (Reset)
+    const handleNegativePress = () => {
+      Alert.alert(
+        "Reiniciar Contador",
+        `¿Has recaído en "${item.name}"? El contador volverá a 0.`,
+        [
+          { text: "No, falsa alarma", style: "cancel" },
+          {
+            text: "Sí, he fallado",
+            style: "destructive",
+            onPress: async () => {
+              try {
+                await HabitService.resetNegativeHabit(item.id);
+                FeedbackService.triggerError(); // Vibración de fallo
+              } catch (e) { Alert.alert("Error", "No se pudo reiniciar"); }
+            }
+          }
+        ]
+      );
+    };
+
     return (
       <TouchableOpacity
         key={item.id}
-        style={styles.miniHabitRow}
+        style={[styles.miniHabitRow, isNegative && { backgroundColor: 'rgba(255, 59, 48, 0.1)' }]}
         onLongPress={() => handleHabitLongPress(item)}
         delayLongPress={500}
         activeOpacity={0.7}
-        // Navegación al detalle del hábito sigue activa
         onPress={() => navigation.navigate('HabitDetail', { habit: item })}
       >
         <View style={styles.miniHabitIcon}><Text style={{ fontSize: 12 }}>{item.icon}</Text></View>
-        <Text style={styles.miniHabitName} numberOfLines={1}>{item.name}</Text>
-        <TouchableOpacity onPress={() => handleCheckIn(item)}>
-          {isCompleted ? <Ionicons name="checkmark-circle" size={20} color="#fff" /> : <View style={styles.radioUnchecked} />}
-        </TouchableOpacity>
+
+        <View style={{ flex: 1, marginRight: 10 }}>
+          <Text style={[styles.miniHabitName, isNegative && { color: colors.danger }]} numberOfLines={1}>{item.name}</Text>
+          {isNegative && (
+            <Text style={{ fontSize: 10, color: colors.textSecondary }}>
+              {item.currentStreak} días libre
+            </Text>
+          )}
+        </View>
+
+        {isNegative ? (
+          // BOTÓN RESET (Solo para hábitos negativos)
+          <TouchableOpacity onPress={handleNegativePress} style={styles.resetBtn}>
+            <Ionicons name="refresh" size={16} color={colors.danger} />
+          </TouchableOpacity>
+        ) : (
+          // CHECKBOX NORMAL (Para hábitos positivos)
+          <TouchableOpacity onPress={() => handleCheckIn(item)}>
+            {isCompleted ? <Ionicons name="checkmark-circle" size={24} color={colors.primary} /> : <View style={styles.radioUnchecked} />}
+          </TouchableOpacity>
+        )}
       </TouchableOpacity>
     );
   };
