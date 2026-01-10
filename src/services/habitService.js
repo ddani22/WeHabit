@@ -1,26 +1,41 @@
 import {
   addDoc,
   collection,
-  deleteDoc,
   doc,
   getDoc,
   getDocs,
   query,
+  runTransaction,
   updateDoc,
   where,
   writeBatch
 } from 'firebase/firestore';
 import { auth, db } from '../../firebaseConfig';
-import FeedService from './feedService';
+import FeedService from './feedService'; // <--- IMPORTANTE: Conectamos con el Feed
 import UserService from './userService';
 
+/**
+ * HELPER: Obtiene la fecha actual en formato YYYY-MM-DD
+ * respetando la ZONA HORARIA LOCAL del dispositivo.
+ */
+const getLocalTodayDate = () => {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+/**
+ * HELPER: Calcula diferencia de días
+ */
 const getDaysDiff = (dateString) => {
   if (!dateString) return 999;
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const lastDate = new Date(dateString);
-  lastDate.setHours(0, 0, 0, 0);
-  const diffTime = Math.abs(today - lastDate);
+  const now = new Date();
+  now.setHours(0, 0, 0, 0);
+  const last = new Date(dateString);
+  last.setHours(0, 0, 0, 0);
+  const diffTime = now - last;
   return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 };
 
@@ -59,6 +74,7 @@ const HabitService = {
         const data = document.data();
         let habit = { id: document.id, ...data };
 
+        // Verificar si la racha se rompió
         if (habit.currentStreak > 0) {
           const daysDiff = getDaysDiff(habit.lastCompletedDate);
           if (daysDiff > 1) {
@@ -69,101 +85,172 @@ const HabitService = {
         }
         habits.push(habit);
       });
-      if (updates.length > 0) await Promise.all(updates);
+
+      if (updates.length > 0) Promise.all(updates).catch(e => console.warn("Background update fail", e));
+
       return habits;
     } catch (error) { console.error(error); throw error; }
   },
 
-  deleteHabit: async (habitId) => {
-    try { await deleteDoc(doc(db, 'habits', habitId)); } catch (error) { throw error; }
-  },
-
-  // --- CORRECCIÓN APLICADA AQUÍ ---
-  checkInHabit: async (habitId, userId) => {
+  /**
+   * BORRAR HÁBITO (CON LIMPIEZA EN CASCADA)
+   * Elimina logs de hoy y feed asociado para evitar "fantasmas" en las estadísticas.
+   */
+  deleteHabit: async (habitId, userId) => { // <--- OJO: Ahora pedimos userId también
     try {
-      const todayISO = new Date().toISOString();
-      const todayDate = todayISO.split('T')[0];
+      const today = getLocalTodayDate();
 
-      const habitRef = doc(db, 'habits', habitId);
-      const habitSnap = await getDoc(habitRef);
-      if (!habitSnap.exists()) throw new Error("Hábito no encontrado");
-      const habitData = habitSnap.data();
-
-      const daysDiff = getDaysDiff(habitData.lastCompletedDate);
-
-      // 1. CONSULTA CORREGIDA: AÑADIDO where("userId", "==", userId)
+      // 1. Borrar Log de Hoy (Si estaba completado, lo quitamos)
       const logsRef = collection(db, 'logs');
-      const qLog = query(
+      const q = query(
         logsRef,
         where("habitId", "==", habitId),
-        where("date", "==", todayDate),
-        where("userId", "==", userId) // <--- ESTE FILTRO FALTABA
+        where("date", "==", today)
       );
-      const snapLog = await getDocs(qLog);
+      const snapshot = await getDocs(q);
 
-      // Si no existe log de hoy, lo creamos
-      if (snapLog.empty) {
-        await addDoc(logsRef, {
-          habitId, userId, date: todayDate, completedAt: todayISO, isCompleted: true
-        });
-      } else {
-        // Si ya existe, no hacemos nada más (ya está marcado)
-        return true;
-      }
+      const batch = writeBatch(db);
 
-      // 2. CALCULAR RACHA
-      let newStreak = habitData.currentStreak || 0;
-
-      if (daysDiff > 0) {
-        if (daysDiff === 1) {
-          newStreak += 1;
-        } else {
-          newStreak = 1;
-        }
-      }
-
-      // 3. ACTUALIZAR HÁBITO
-      await updateDoc(habitRef, {
-        currentStreak: newStreak,
-        lastCompletedDate: todayISO,
-        bestStreak: Math.max(newStreak, habitData.bestStreak || 0)
+      // Añadimos al lote el borrado de logs de hoy
+      snapshot.forEach(doc => {
+        batch.delete(doc.ref);
       });
 
-      // 4. FEED Y XP
-      if (daysDiff > 0) {
-        try {
-          const userRef = doc(db, 'users', userId);
-          const userSnap = await getDoc(userRef);
+      // 2. Borrar el Hábito en sí
+      const habitRef = doc(db, 'habits', habitId);
+      batch.delete(habitRef);
 
-          if (userSnap.exists()) {
-            const userData = userSnap.data();
-            const streakMsg = newStreak > 1 ? `¡Racha de ${newStreak} días! 🔥` : "Ha comenzado un hábito";
+      // Ejecutamos borrados en DB
+      await batch.commit();
+
+      // 3. Limpiar Feed Social (Si se publicó algo)
+      // Lo hacemos fuera del batch porque es otro servicio
+      if (userId) {
+        await FeedService.removeLog(userId, 'habit_done', habitId);
+      }
+
+    } catch (error) {
+      console.error("Error borrando hábito:", error);
+      throw error;
+    }
+  },
+
+  /**
+   * CHECK-IN (CON PUBLICACIÓN EN FEED)
+   */
+  checkInHabit: async (habitId, userId) => {
+    try {
+      const todayDate = getLocalTodayDate();
+      const completedAtISO = new Date().toISOString();
+      let streakUpdatedInfo = null;
+
+      // 1. TRANSACCIÓN ATÓMICA
+      await runTransaction(db, async (transaction) => {
+        const habitRef = doc(db, 'habits', habitId);
+        const habitDoc = await transaction.get(habitRef);
+
+        if (!habitDoc.exists()) throw new Error("Hábito no encontrado");
+
+        const habitData = habitDoc.data();
+
+        // Si ya se hizo hoy, salimos (Idempotencia)
+        if (habitData.lastCompletedDate) {
+          const lastDateLocal = new Date(habitData.lastCompletedDate);
+          const lastDateString = `${lastDateLocal.getFullYear()}-${String(lastDateLocal.getMonth() + 1).padStart(2, '0')}-${String(lastDateLocal.getDate()).padStart(2, '0')}`;
+          if (lastDateString === todayDate) {
+            streakUpdatedInfo = { alreadyDone: true };
+            return;
+          }
+        }
+
+        const daysDiff = getDaysDiff(habitData.lastCompletedDate);
+        let newStreak = habitData.currentStreak || 0;
+
+        if (daysDiff === 1) newStreak += 1;
+        else newStreak = 1;
+
+        const newBestStreak = Math.max(newStreak, habitData.bestStreak || 0);
+
+        // Actualizar Hábito
+        transaction.update(habitRef, {
+          currentStreak: newStreak,
+          bestStreak: newBestStreak,
+          lastCompletedDate: completedAtISO
+        });
+
+        // Crear Log
+        const newLogRef = doc(collection(db, 'logs'));
+        transaction.set(newLogRef, {
+          habitId,
+          userId,
+          date: todayDate,
+          completedAt: completedAtISO,
+          isCompleted: true
+        });
+
+        streakUpdatedInfo = {
+          newStreak,
+          habitName: habitData.name,
+          daysDiff
+        };
+      });
+
+      // 2. POST-PROCESAMIENTO: FEED Y XP
+      if (streakUpdatedInfo && !streakUpdatedInfo.alreadyDone) {
+        const { newStreak, habitName, daysDiff } = streakUpdatedInfo;
+
+        // Solo notificamos si realmente es un día nuevo
+        if (daysDiff > 0) {
+          try {
+            // Recuperar datos de usuario para el feed
+            const userDoc = await getDoc(doc(db, 'users', userId));
+            const userData = userDoc.exists() ? userDoc.data() : {};
+            const username = userData.username || 'Usuario';
+            const avatar = userData.avatar || null;
+
+            // --- PUBLICAR EN FEED ---
+            // "Usuario completó: Leer" (Racha de X días)
+            const desc = newStreak > 1
+              ? `¡Mantiene una racha de ${newStreak} días! 🔥`
+              : `Ha completado su primer día hoy.`;
 
             await FeedService.logActivity(
               userId,
-              userData.username || 'Usuario',
-              userData.avatar || null,
+              username,
+              avatar,
               'habit_done',
-              `Completó: ${habitData.name}`,
-              streakMsg
+              `Completó: ${habitName}`,
+              desc,
+              habitId // <--- CLAVE: Pasamos el ID para poder borrarlo después
             );
-          }
-        } catch (feedError) { console.warn("Error feed:", feedError); }
 
-        let xpEarned = 10;
-        if (newStreak > 3) xpEarned += 5;
-        UserService.addExperience(userId, xpEarned);
+            // --- DAR XP ---
+            let xpEarned = 10;
+            if (newStreak > 3) xpEarned += 5;
+            if (newStreak > 7) xpEarned += 10;
+            UserService.addExperience(userId, xpEarned).catch(console.error);
+
+          } catch (postError) {
+            console.warn("Error Feed/XP:", postError);
+          }
+        }
       }
 
       return true;
-    } catch (error) { console.error("Error en checkIn:", error); throw error; }
+    } catch (error) {
+      console.error("Error checkIn:", error);
+      throw error;
+    }
   },
 
+  /**
+   * UNDO (CON BORRADO DE FEED)
+   */
   undoCheckIn: async (habitId, userId) => {
     try {
-      const today = new Date().toISOString().split('T')[0];
+      const today = getLocalTodayDate();
 
-      // 1. Obtener el log de hoy para borrarlo
+      // 1. Borrar Log de base de datos
       const logsRef = collection(db, 'logs');
       const q = query(
         logsRef,
@@ -173,53 +260,54 @@ const HabitService = {
       );
       const snapshot = await getDocs(q);
 
-      if (snapshot.empty) return; // Si no hay log de hoy, no hacemos nada
+      if (snapshot.empty) return;
 
       const batch = writeBatch(db);
       snapshot.forEach(doc => {
         batch.delete(doc.ref);
       });
 
-      // 2. BUSCAR LA FECHA ANTERIOR REAL (Para restaurar lastCompletedDate)
-      // Nota: Si no tienes índices compuestos creados, evitar orderBy/limit en la query.
-      // Traemos los logs y filtramos en memoria (seguro para MVP).
-      const qHistory = query(
-        logsRef,
-        where("habitId", "==", habitId),
-        where("userId", "==", userId)
-      );
+      // 2. Restaurar estado anterior del Hábito
+      // (Buscamos la fecha anterior para ser precisos)
+      const qHistory = query(logsRef, where("habitId", "==", habitId), where("userId", "==", userId));
       const historySnap = await getDocs(qHistory);
-
-      // Filtramos en JS para encontrar la fecha más reciente que NO sea hoy
       const validDates = historySnap.docs
-        .map(d => d.data().completedAt) // Usamos el ISO string completo o 'date'
-        .filter(d => d && !d.startsWith(today)) // Excluir hoy
-        .sort() // Ordenar cronológicamente
-        .reverse(); // El primero será el más reciente
-
+        .map(d => d.data().completedAt)
+        .filter(d => {
+          if (!d) return false;
+          const logDate = new Date(d);
+          const logDateStr = `${logDate.getFullYear()}-${String(logDate.getMonth() + 1).padStart(2, '0')}-${String(logDate.getDate()).padStart(2, '0')}`;
+          return logDateStr !== today;
+        })
+        .sort().reverse();
       const previousDate = validDates.length > 0 ? validDates[0] : null;
 
-      // 3. Actualizar el Hábito de forma segura
       const habitRef = doc(db, 'habits', habitId);
       const habitSnap = await getDoc(habitRef);
 
       if (habitSnap.exists()) {
         const currentStreak = habitSnap.data().currentStreak || 0;
-        const newStreak = Math.max(0, currentStreak - 1); // BLINDAJE CONTRA NEGATIVOS
+        const newStreak = Math.max(0, currentStreak - 1);
 
         batch.update(habitRef, {
           currentStreak: newStreak,
-          lastCompletedDate: previousDate // Restauramos la fecha anterior o null
+          lastCompletedDate: previousDate
         });
       }
 
       await batch.commit();
+
+      // 3. --- LIMPIEZA DEL FEED (NUEVO) ---
+      // Buscamos y borramos la notificación relacionada con este hábito
+      await FeedService.removeLog(userId, 'habit_done', habitId);
+
     } catch (error) {
       console.error("Error deshaciendo:", error);
       throw error;
     }
   },
 
+  // ... (Resto de métodos sin cambios: updateHabit, deleteMultipleHabits, etc.) ...
   updateHabit: async (habitId, updatedFields) => {
     try {
       const habitRef = doc(db, 'habits', habitId);
@@ -265,7 +353,7 @@ const HabitService = {
   },
 
   getTodayLogs: async (userId) => {
-    const today = new Date().toISOString().split('T')[0];
+    const today = getLocalTodayDate();
     const q = query(collection(db, 'logs'), where("userId", "==", userId), where("date", "==", today));
     const snapshot = await getDocs(q);
     return snapshot.docs.map(doc => doc.data().habitId);

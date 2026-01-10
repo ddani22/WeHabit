@@ -1,10 +1,10 @@
 import { StatusBar } from 'expo-status-bar';
-import { useEffect } from 'react'; // <--- Importar useEffect
+import { useEffect } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { ThemeProvider, useTheme } from './src/context/ThemeContext';
 import RootNavigator from './src/navigation/RootNavigator';
 
-// Importar el servicio nuevo
+// Importar el servicio refactorizado
 import NotificationService from './src/services/notificationService';
 
 const MainLayout = () => {
@@ -21,7 +21,14 @@ export default function App() {
 
   // --- LÓGICA DE INICIO ---
   useEffect(() => {
-    NotificationService.scheduleDailyReminder(18, 0);
+    const initNotifications = async () => {
+      // Intentamos programar el recordatorio por defecto (18:00)
+      // PERO pasamos 'false' como tercer argumento para NO sobrescribir
+      // si el usuario ya configuró otra hora anteriormente.
+      await NotificationService.scheduleDailyReminder(18, 0, false);
+    };
+
+    initNotifications();
   }, []);
 
   return (

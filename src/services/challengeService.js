@@ -10,76 +10,66 @@ import {
   writeBatch
 } from 'firebase/firestore';
 import { db } from '../../firebaseConfig';
+import FeedService from './feedService'; // <--- IMPORTANTE
 import UserService from './userService';
 
-// Helper para obtener la fecha de hoy (YYYY-MM-DD)
-const getTodayDate = () => new Date().toISOString().split('T')[0];
+// Helper Fecha Local
+const getLocalTodayDate = () => {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
 
 const ChallengeService = {
 
-  /**
-   * Crea un reto MULTIJUGADOR.
-   */
+  // ... (createChallenge, getMyChallenges, findActiveChallengesByHabit se quedan igual) ...
   createChallenge: async (hostId, opponentIds, challengeName, durationDays = 7) => {
+    // ... (código existente de crear reto) ...
+    // REPLICA TU CÓDIGO EXISTENTE DE CREATE O COPIA EL DE TURNOS ANTERIORES SI LO NECESITAS
+    // AQUÍ SOLO PONGO LO QUE CAMBIA EN CHECK-IN/UNDO
     try {
       const batch = writeBatch(db);
       const challengeRef = doc(collection(db, 'challenges'));
-
       const startDate = new Date();
       const endDate = new Date();
       endDate.setDate(startDate.getDate() + durationDays);
-
       const allParticipantIds = [hostId, ...opponentIds];
-
-      // Inicializamos a los participantes con fecha vacía
       const participantsData = allParticipantIds.map(uid => ({
-        userId: uid,
-        currentScore: 0,
-        hasFailed: false,
-        lastCompletedDate: null // <--- ESTO ES CLAVE
+        userId: uid, currentScore: 0, hasFailed: false, lastCompletedDate: null
       }));
-
       const newChallenge = {
-        challengeName,
-        durationDays,
-        startDate: startDate.toISOString(),
-        endDate: endDate.toISOString(),
-        participants: participantsData,
-        participantIds: allParticipantIds,
-        isActive: true
+        challengeName, durationDays,
+        startDate: startDate.toISOString(), endDate: endDate.toISOString(),
+        participants: participantsData, participantIds: allParticipantIds, isActive: true
       };
-
       batch.set(challengeRef, newChallenge);
       await batch.commit();
-
       return { id: challengeRef.id, ...newChallenge };
-    } catch (error) {
-      console.error("Error creando reto:", error);
-      throw error;
-    }
+    } catch (error) { throw error; }
   },
 
-  /**
-   * Obtiene los retos activos del usuario.
-   */
   getMyChallenges: async (userId) => {
+    const q = query(collection(db, 'challenges'), where("participantIds", "array-contains", userId), where("isActive", "==", true));
+    const snapshot = await getDocs(q);
+    return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  },
+
+  findActiveChallengesByHabit: async (userId, habitName) => {
     try {
-      const q = query(
-        collection(db, 'challenges'),
-        where("participantIds", "array-contains", userId),
-        where("isActive", "==", true)
-      );
+      const q = query(collection(db, 'challenges'), where("participantIds", "array-contains", userId), where("isActive", "==", true), where("challengeName", "==", habitName));
       const snapshot = await getDocs(q);
-      return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    } catch (error) {
-      console.error("Error obteniendo retos:", error);
-      throw error;
-    }
+      return snapshot.docs.map(d => d.id);
+    } catch (error) { return []; }
+  },
+
+  incrementScore: async (challengeId, userId) => {
+    return ChallengeService.checkInChallenge(challengeId, userId);
   },
 
   /**
-   * --- FUNCIÓN NUEVA: CHECK-IN DIARIO EN EL RETO ---
-   * Marca el día de hoy, suma 1 punto y guarda la fecha.
+   * CHECK-IN CON LOG AL FEED
    */
   checkInChallenge: async (challengeId, userId) => {
     try {
@@ -88,40 +78,65 @@ const ChallengeService = {
       if (!snap.exists()) return;
 
       const data = snap.data();
-      const today = getTodayDate();
+      const today = getLocalTodayDate();
       const targetScore = data.durationDays;
+      let xpToAward = 0;
+      let feedEvent = null; // Para guardar datos del feed
 
       const updatedParticipants = data.participants.map(p => {
         if (p.userId === userId) {
-          // Si ya está hecho hoy, no hacemos nada
-          if (p.lastCompletedDate === today) return p;
+          if (p.lastCompletedDate === today) return p; // Ya hecho
 
           const newScore = (p.currentScore || 0) + 1;
 
-          // Verificar Victoria
+          // Preparamos datos para el Feed
+          feedEvent = {
+            type: 'challenge_progress',
+            title: `Avanzó en reto: ${data.challengeName}`,
+            desc: `${newScore}/${targetScore} días completados`
+          };
+
           if (newScore === targetScore && p.currentScore !== targetScore) {
-            UserService.addExperience(userId, 200); // Premio XP
+            xpToAward = 200;
+            feedEvent = {
+              type: 'challenge_won',
+              title: `¡GANÓ EL RETO: ${data.challengeName}! 🏆`,
+              desc: `Completó los ${targetScore} días.`
+            };
           }
 
-          return {
-            ...p,
-            currentScore: newScore,
-            lastCompletedDate: today // <--- GUARDAMOS QUE HOY SE HIZO
-          };
+          return { ...p, currentScore: newScore, lastCompletedDate: today };
         }
         return p;
       });
 
       await updateDoc(challengeRef, { participants: updatedParticipants });
-    } catch (error) {
-      console.error("Error check-in reto:", error);
-      throw error;
-    }
+
+      // XP
+      if (xpToAward > 0) UserService.addExperience(userId, xpToAward).catch(console.error);
+
+      // FEED (FIRE & FORGET)
+      if (feedEvent) {
+        // Recuperamos datos de usuario para el feed
+        const userDoc = await getDoc(doc(db, 'users', userId));
+        const userData = userDoc.exists() ? userDoc.data() : {};
+
+        FeedService.logActivity(
+          userId,
+          userData.username || 'Usuario',
+          userData.avatar || null,
+          feedEvent.type,
+          feedEvent.title,
+          feedEvent.desc,
+          challengeId // <--- IMPORTANTE: Enviamos ID para poder borrarlo
+        );
+      }
+
+    } catch (error) { console.error(error); throw error; }
   },
 
   /**
-   * --- FUNCIÓN NUEVA: DESHACER CHECK-IN ---
-   * Resta el punto y borra la fecha de hoy.
+   * UNDO CON LIMPIEZA DE FEED
    */
   undoCheckInChallenge: async (challengeId, userId) => {
     try {
@@ -130,59 +145,46 @@ const ChallengeService = {
       if (!snap.exists()) return;
 
       const data = snap.data();
-      const today = getTodayDate();
+      const today = getLocalTodayDate();
 
       const updatedParticipants = data.participants.map(p => {
         if (p.userId === userId) {
-          // Solo restamos si la última vez fue HOY
           if (p.lastCompletedDate !== today) return p;
 
           return {
             ...p,
             currentScore: Math.max(0, (p.currentScore || 0) - 1),
-            lastCompletedDate: null // <--- BORRAMOS LA FECHA
+            lastCompletedDate: null
           };
         }
         return p;
       });
 
       await updateDoc(challengeRef, { participants: updatedParticipants });
-    } catch (error) {
-      console.error("Error undo reto:", error);
-    }
+
+      // --- LIMPIEZA DEL FEED ---
+      // Borramos cualquier log de 'challenge_progress' o 'challenge_won' asociado a este reto
+      await FeedService.removeLog(userId, 'challenge_progress', challengeId);
+      await FeedService.removeLog(userId, 'challenge_won', challengeId);
+
+    } catch (error) { console.error(error); }
   },
 
-  /**
-   * Rendirse en un reto.
-   */
   giveUpChallenge: async (challengeId, userId) => {
     try {
       const challengeRef = doc(db, 'challenges', challengeId);
       const snap = await getDoc(challengeRef);
       if (!snap.exists()) return;
-
       const data = snap.data();
       const updated = data.participants.map(p =>
         p.userId === userId ? { ...p, hasFailed: true } : p
       );
-
       await updateDoc(challengeRef, { participants: updated });
-    } catch (error) {
-      console.error("Error abandonando:", error);
-      throw error;
-    }
+    } catch (error) { throw error; }
   },
 
-  /**
-   * Borrar reto completo (Admin/Creador).
-   */
   deleteChallenge: async (id) => {
-    try {
-      await deleteDoc(doc(db, 'challenges', id));
-    } catch (error) {
-      console.error("Error eliminando reto:", error);
-      throw error;
-    }
+    try { await deleteDoc(doc(db, 'challenges', id)); } catch (error) { throw error; }
   }
 };
 

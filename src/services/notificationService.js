@@ -1,7 +1,7 @@
 import * as Notifications from 'expo-notifications';
-import { Alert } from 'react-native';
+import { Platform } from 'react-native';
 
-// Configuración para que la notificación se vea incluso con la app abierta
+// Configuración de comportamiento cuando la app está en primer plano
 Notifications.setNotificationHandler({
     handleNotification: async () => ({
         shouldShowAlert: true,
@@ -12,46 +12,107 @@ Notifications.setNotificationHandler({
 
 const NotificationService = {
 
+    /**
+     * Solicita permisos de notificación de forma robusta.
+     */
     requestPermissions: async () => {
-        // 1. Ver estado actual
+        if (Platform.OS === 'android') {
+            await Notifications.setNotificationChannelAsync('daily-reminder', {
+                name: 'Recordatorio Diario',
+                importance: Notifications.AndroidImportance.MAX,
+                vibrationPattern: [0, 250, 250, 250],
+                lightColor: '#FF231F7C',
+            });
+        }
+
         const { status: existingStatus } = await Notifications.getPermissionsAsync();
         let finalStatus = existingStatus;
 
-        // 2. Si no está concedido, pedirlo
         if (existingStatus !== 'granted') {
             const { status } = await Notifications.requestPermissionsAsync();
             finalStatus = status;
         }
 
-        // 3. DEBUG: Si falla, avisar al usuario para que vaya a Ajustes
         if (finalStatus !== 'granted') {
-            Alert.alert(
-                "Permisos Denegados",
-                "iOS ha bloqueado las notificaciones. Ve a Ajustes -> Expo Go -> Notificaciones y actívalas manualmente."
-            );
             return false;
         }
         return true;
     },
 
-    scheduleDailyReminder: async (hour = 18, minute = 0) => {
-        await Notifications.cancelAllScheduledNotificationsAsync();
+    /**
+     * Programa el recordatorio diario.
+     * @param {number} hour - Hora (0-23)
+     * @param {number} minute - Minuto (0-59)
+     * @param {boolean} shouldOverride - Si es true, cancela lo anterior y fuerza la nueva hora.
+     */
+    scheduleDailyReminder: async (hour = 18, minute = 0, shouldOverride = true) => {
         const hasPermission = await NotificationService.requestPermissions();
-        if (!hasPermission) return;
+        if (!hasPermission) return false;
 
-        await Notifications.scheduleNotificationAsync({
-            content: {
-                title: "🔥 ¡No rompas tu racha!",
-                body: "Tómate 2 minutos para marcar tus hábitos.",
-                sound: true,
-            },
-            trigger: {
-                hour: hour,
-                minute: minute,
-                repeats: true
-            },
-        });
+        // 1. Verificar si ya hay notificaciones para no machacar preferencias
+        if (!shouldOverride) {
+            const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+            if (scheduled.length > 0) {
+                // Ya existe una configuración, no tocamos nada (respetamos al usuario)
+                return true;
+            }
+        }
+
+        // 2. Limpiar anteriores si estamos forzando o configurando de cero
+        await Notifications.cancelAllScheduledNotificationsAsync();
+
+        // 3. Programar la nueva
+        const trigger = {
+            hour,
+            minute,
+            repeats: true,
+        };
+
+        try {
+            await Notifications.scheduleNotificationAsync({
+                content: {
+                    title: "🔥 ¡No rompas tu racha!",
+                    body: "Es hora de marcar tus hábitos del día.",
+                    sound: true,
+                },
+                trigger,
+            });
+            return true;
+        } catch (error) {
+            console.error("Error programando notificación:", error);
+            return false;
+        }
     },
+
+    /**
+     * Cancela todas las notificaciones (ej. el usuario las desactiva en ajustes).
+     */
+    cancelAll: async () => {
+        await Notifications.cancelAllScheduledNotificationsAsync();
+    },
+
+    /**
+     * Devuelve la hora programada actual (útil para mostrar en UI).
+     * Retorna { hour, minute } o null.
+     */
+    getCurrentSchedule: async () => {
+        const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+        if (scheduled.length > 0 && scheduled[0].trigger) {
+            // Expo devuelve estructuras diferentes según OS, intentamos normalizar
+            const trigger = scheduled[0].trigger;
+            if (trigger.hour !== undefined && trigger.minute !== undefined) {
+                return { hour: trigger.hour, minute: trigger.minute };
+            }
+            // Fallback para triggers de fecha
+            if (trigger.dateComponents) {
+                return {
+                    hour: trigger.dateComponents.hour,
+                    minute: trigger.dateComponents.minute
+                };
+            }
+        }
+        return null;
+    }
 };
 
 export default NotificationService;

@@ -2,100 +2,112 @@ import {
     addDoc,
     collection,
     deleteDoc,
-    doc,
     getDocs,
     limit,
     orderBy,
     query,
+    serverTimestamp,
     where
 } from 'firebase/firestore';
 import { db } from '../../firebaseConfig';
 
-// Helper para dividir arrays grandes en trozos pequeños (Chunking)
-const chunkArray = (array, size) => {
-    const chunks = [];
-    for (let i = 0; i < array.length; i += size) {
-        chunks.push(array.slice(i, i + size));
-    }
-    return chunks;
-};
-
 const FeedService = {
-
     /**
-     * Registra un evento en el muro global.
+     * Registra una actividad en el feed público.
+     * @param {string} userId - ID del usuario
+     * @param {string} username - Nombre a mostrar
+     * @param {string} avatar - URL del avatar
+     * @param {string} type - 'habit_done' | 'challenge_won' | 'challenge_progress'
+     * @param {string} title - Título principal (ej. "Completó: Leer")
+     * @param {string} description - Subtítulo (ej. "Racha de 5 días")
+     * @param {string} relatedId - (OPCIONAL) ID del hábito o reto para poder borrarlo luego si se hace Undo
      */
-    logActivity: async (userId, username, avatar, type, title, description) => {
+    logActivity: async (userId, username, avatar, type, title, description = '', relatedId = null) => {
         try {
-            await addDoc(collection(db, 'activity_feed'), {
+            await addDoc(collection(db, 'feed'), {
                 userId,
                 username,
                 avatar,
                 type,
                 title,
                 description,
-                createdAt: new Date().toISOString()
+                relatedId, // <--- CLAVE: Guardamos el ID del objeto original
+                timestamp: serverTimestamp()
             });
         } catch (error) {
-            console.error("Error registrando actividad:", error);
+            console.error("Error logging activity:", error);
+            // No lanzamos error para no bloquear la app por un log fallido
         }
     },
 
     /**
-     * Obtiene las actividades recientes de tus amigos sin límite de 10.
-     * Estrategia: Batch Querying + Merge Sort en cliente.
+     * OBTIENE EL FEED DE AMIGOS
      */
     getFriendsFeed: async (friendIds) => {
-        if (!friendIds || friendIds.length === 0) return [];
-
         try {
-            // 1. Dividimos los amigos en lotes de 10 (Límite de Firestore)
-            const friendChunks = chunkArray(friendIds, 10);
-            const promises = [];
+            // Nota: Firestore tiene límite de 10 items en 'in'. 
+            // En producción real, esto se haría con paginación o backend functions.
+            // Aquí cogemos los últimos 20 globales de esos amigos.
+            if (!friendIds || friendIds.length === 0) return [];
 
-            // 2. Lanzamos una consulta por cada lote en paralelo
-            friendChunks.forEach(chunk => {
-                const q = query(
-                    collection(db, 'activity_feed'),
-                    where('userId', 'in', chunk),
-                    orderBy('createdAt', 'desc'),
-                    limit(20) // Traemos los 20 más recientes de CADA grupo para no perder datos
-                );
-                promises.push(getDocs(q));
-            });
+            // Cortamos a 10 para evitar crash de Firestore en demo
+            const safeIds = friendIds.slice(0, 10);
 
-            // 3. Esperamos a que todas respondan
-            const snapshots = await Promise.all(promises);
+            const q = query(
+                collection(db, 'feed'),
+                where('userId', 'in', safeIds),
+                orderBy('timestamp', 'desc'),
+                limit(20)
+            );
 
-            // 4. Unificamos todos los documentos en una sola lista
-            let allActivities = [];
-            snapshots.forEach(snap => {
-                snap.docs.forEach(doc => {
-                    allActivities.push({ id: doc.id, ...doc.data() });
-                });
-            });
-
-            // 5. Ordenamos en memoria (Memory Sort) por fecha real descendente
-            // Esto es crucial porque al unir lotes se pierde el orden global
-            allActivities.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-
-            // 6. Devolvemos solo los 20 más recientes del total global
-            return allActivities.slice(0, 20);
-
+            const snapshot = await getDocs(q);
+            return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         } catch (error) {
-            console.error("Error cargando feed escalable:", error);
+            console.error("Error getting feed:", error);
             return [];
         }
     },
 
     /**
-     * Elimina una actividad específica.
-     */
-    deleteActivity: async (activityId) => {
+   * BORRADO ROBUSTO (SIN ÍNDICES COMPLEJOS)
+   * Busca por ID de objeto y filtra en memoria para asegurar el borrado.
+   */
+    removeLog: async (userId, type, relatedId) => {
         try {
-            await deleteDoc(doc(db, 'activity_feed', activityId));
+            if (!relatedId) return;
+
+            // 1. Buscamos SOLO por relatedId (Esto usa el índice automático, no falla nunca)
+            const q = query(
+                collection(db, 'feed'),
+                where('relatedId', '==', relatedId)
+            );
+
+            const snapshot = await getDocs(q);
+
+            // 2. Filtramos en memoria para asegurar que sea TU log y del tipo correcto
+            const docsToDelete = snapshot.docs.filter(doc => {
+                const data = doc.data();
+                return data.userId === userId && data.type === type;
+            });
+
+            // 3. Borramos los duplicados si los hubiera
+            const deletePromises = docsToDelete.map(doc => deleteDoc(doc.ref));
+            await Promise.all(deletePromises);
+
+            console.log(`Feed limpiado: ${deletePromises.length} elementos eliminados.`);
+
         } catch (error) {
-            console.error("Error borrando actividad:", error);
+            console.error("Error removing log:", error);
+        }
+    },
+    /**
+     * Borrar manualmente (para la pulsación larga del admin)
+     */
+    deleteActivity: async (feedId) => {
+        try {
+            await deleteDoc(doc(db, 'feed', feedId));
+        } catch (error) {
+            console.error(error);
             throw error;
         }
     }

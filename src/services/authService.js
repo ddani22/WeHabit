@@ -5,20 +5,17 @@ import {
   signInWithEmailAndPassword
 } from 'firebase/auth';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { auth, db } from '../../firebaseConfig'; // Ajusta la ruta según donde esté tu config
+import { auth, db } from '../../firebaseConfig';
 
 /**
  * Servicio de Autenticación y Gestión de Usuarios.
- * Sigue el patrón Facade para abstraer la complejidad de Firebase.
+ * PATRÓN FACADE + SELF-HEALING
  */
 const AuthService = {
 
   /**
-   * Registra un nuevo usuario y crea su documento en Firestore.
-   * @param {string} email 
-   * @param {string} password 
-   * @param {string} username 
-   * @returns {Promise<Object>} El objeto de usuario combinado (Auth + Firestore Data)
+   * Registra un nuevo usuario con el SCHEMA COMPLETO inicializado.
+   * Evita errores de "undefined" en gamificación y configuración.
    */
   register: async (email, password, username) => {
     try {
@@ -26,47 +23,78 @@ const AuthService = {
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
       const user = userCredential.user;
 
-      // 2. Definir datos iniciales del documento de usuario
-      // NOTA: Inicializamos friendList vacío y createdAt para auditoría.
+      // 2. Definir datos iniciales (SCHEMA ROBUSTO)
       const userData = {
         id: user.uid,
         email: user.email,
         username: username.trim(),
-        friendList: [],
         avatarUrl: null,
+
+        // Relaciones
+        friendList: [],
+
+        // Gamificación (Inicialización vital para UserService)
+        totalXP: 0,
+        level: 1,
+
+        // Personalización
+        customCategories: [],
+
+        // Configuración
+        settings: {
+          notificationsEnabled: true,
+          theme: 'system'
+        },
+
+        // Auditoría
         createdAt: new Date().toISOString(),
+        lastLoginAt: new Date().toISOString()
       };
 
-      // 3. Crear documento en Firestore (users collection)
+      // 3. Crear documento en Firestore
       await setDoc(doc(db, 'users', user.uid), userData);
 
       return userData;
     } catch (error) {
-      // Estandarización de errores para la UI
       throw _handleAuthError(error);
     }
   },
 
   /**
-   * Inicia sesión y recupera datos extra del perfil.
-   * @param {string} email 
-   * @param {string} password 
-   * @returns {Promise<Object>} Datos del usuario
+   * Inicia sesión con mecanismo de AUTO-CURACIÓN.
+   * Si el perfil de Firestore no existe, lo regenera.
    */
   login: async (email, password) => {
     try {
       const userCredential = await signInWithEmailAndPassword(auth, email, password);
       const user = userCredential.user;
+      const userRef = doc(db, 'users', user.uid);
 
-      // Recuperar datos extendidos de Firestore
-      const userDoc = await getDoc(doc(db, 'users', user.uid));
+      // Recuperar datos extendidos
+      let userDoc = await getDoc(userRef);
 
-      if (userDoc.exists()) {
-        return { ...userDoc.data(), id: user.uid };
-      } else {
-        // Edge Case: Usuario existe en Auth pero no en Firestore (Data corruption)
-        throw new Error("PERFIL_NO_ENCONTRADO");
+      // --- SELF-HEALING START ---
+      if (!userDoc.exists()) {
+        console.warn(`⚠️ Perfil no encontrado para ${user.email}. Regenerando...`);
+
+        // Reconstruimos un perfil básico para salvar la cuenta
+        const recoveryData = {
+          id: user.uid,
+          email: user.email,
+          username: user.email.split('@')[0], // Fallback de nombre
+          friendList: [],
+          totalXP: 0,
+          customCategories: [],
+          createdAt: new Date().toISOString(),
+          recoveredAt: new Date().toISOString()
+        };
+
+        await setDoc(userRef, recoveryData);
+        userDoc = await getDoc(userRef); // Leer de nuevo
       }
+      // --- SELF-HEALING END ---
+
+      return { ...userDoc.data(), id: user.uid };
     } catch (error) {
       throw _handleAuthError(error);
     }
@@ -80,10 +108,6 @@ const AuthService = {
     }
   },
 
-  /**
-   * Envía un correo de recuperación de contraseña.
-   * @param {string} email
-   */
   recoverPassword: async (email) => {
     try {
       await sendPasswordResetEmail(auth, email);
@@ -95,8 +119,7 @@ const AuthService = {
 };
 
 /**
- * Helper privado para traducir códigos de error de Firebase a mensajes humanos.
- * Esto mejora la UX drásticamente.
+ * Helper de Errores
  */
 const _handleAuthError = (error) => {
   let message = "Ocurrió un error inesperado.";
@@ -104,10 +127,10 @@ const _handleAuthError = (error) => {
 
   if (code.includes('auth/email-already-in-use')) message = "El correo ya está registrado.";
   if (code.includes('auth/invalid-email')) message = "El formato del correo es inválido.";
-  if (code.includes('auth/user-not-found')) message = "No existe cuenta con este correo."; // <--- Útil para recover
-  if (code.includes('auth/wrong-password')) message = "Credenciales incorrectas.";
-  if (code.includes('auth/weak-password')) message = "La contraseña es muy débil.";
-  if (code.includes('auth/too-many-requests')) message = "Demasiados intentos. Espera unos minutos.";
+  if (code.includes('auth/user-not-found') || code.includes('auth/invalid-credential')) message = "Credenciales incorrectas.";
+  if (code.includes('auth/wrong-password')) message = "Contraseña incorrecta.";
+  if (code.includes('auth/weak-password')) message = "La contraseña es muy débil (mínimo 6 caracteres).";
+  if (code.includes('auth/too-many-requests')) message = "Cuenta bloqueada temporalmente por seguridad. Intenta más tarde.";
 
   return { code, message, originalError: error };
 };
